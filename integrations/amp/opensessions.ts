@@ -7,9 +7,11 @@
  *   Copy this file to ~/.config/amp/plugins/opensessions.ts
  *
  * Events mapped:
- *   agent.start → running
- *   agent.end   → done/error (based on event.status)
- *   tool.call   → running
+ *   session.start → idle
+ *   agent.start   → running
+ *   agent.end     → done/error/interrupted (based on event.status)
+ *   tool.call     → running
+ *   tool.result   → error (only on tool failure)
  */
 
 // @i-know-the-amp-plugin-api-is-wip-and-very-experimental-right-now
@@ -48,14 +50,19 @@ export default function (amp: PluginAPI) {
     sessionName = name;
   });
 
-  amp.on("agent.start", async (_event, _ctx) => {
-    if (!sessionName) sessionName = await getTmuxSession(amp.$);
+  amp.on("session.start", async (_event, ctx) => {
+    if (!sessionName) sessionName = await getTmuxSession(ctx.$);
+    await writeEvent("amp", sessionName, "idle");
+  });
+
+  amp.on("agent.start", async (_event, ctx) => {
+    if (!sessionName) sessionName = await getTmuxSession(ctx.$);
     await writeEvent("amp", sessionName, "running");
     return {};
   });
 
-  amp.on("agent.end", async (event, _ctx) => {
-    if (!sessionName) sessionName = await getTmuxSession(amp.$);
+  amp.on("agent.end", async (event, ctx) => {
+    if (!sessionName) sessionName = await getTmuxSession(ctx.$);
     await writeEvent("amp", sessionName, event.status);
     return undefined;
   });
@@ -63,5 +70,14 @@ export default function (amp: PluginAPI) {
   amp.on("tool.call", async (_event, _ctx) => {
     if (sessionName) await writeEvent("amp", sessionName, "running");
     return { action: "allow" };
+  });
+
+  amp.on("tool.result", async (event, _ctx) => {
+    if (!sessionName) return;
+    if (event.status === "error") {
+      await writeEvent("amp", sessionName, "error");
+    } else if (event.status === "cancelled") {
+      await writeEvent("amp", sessionName, "interrupted");
+    }
   });
 }
