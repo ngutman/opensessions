@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 
 import type { PartialTheme } from "./themes";
@@ -41,4 +41,22 @@ export function loadConfig(homeDir?: string): OpensessionsConfig {
   } catch {
     return { ...DEFAULTS };
   }
+}
+
+/**
+ * Save partial config updates to ~/.config/opensessions/config.json
+ * Merges with existing config on disk to preserve fields.
+ * @param updates — partial config fields to write
+ * @param homeDir — override home directory (for testing)
+ */
+export function saveConfig(updates: Partial<OpensessionsConfig>, homeDir?: string): void {
+  const home = homeDir ?? process.env.HOME ?? process.env.USERPROFILE ?? "";
+  const configDir = join(home, ".config", "opensessions");
+  const configPath = join(configDir, "config.json");
+
+  const existing = loadConfig(homeDir);
+  const merged = { ...existing, ...updates };
+
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(configPath, JSON.stringify(merged, null, 2) + "\n");
 }

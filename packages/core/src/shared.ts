@@ -27,6 +27,7 @@ export interface ServerState {
   sessions: SessionData[];
   focusedSession: string | null;
   currentSession: string | null;
+  theme: string | undefined;
   ts: number;
 }
 
@@ -43,10 +44,12 @@ export type ClientCommand =
   | { type: "switch-index"; index: number }
   | { type: "new-session" }
   | { type: "kill-session"; name: string }
+  | { type: "reorder-session"; name: string; delta: -1 | 1 }
   | { type: "refresh" }
   | { type: "move-focus"; delta: -1 | 1 }
   | { type: "focus-session"; name: string }
   | { type: "mark-seen"; name: string }
+  | { type: "set-theme"; theme: string }
   | { type: "identify"; clientTty: string };
 
 // Catppuccin Mocha palette

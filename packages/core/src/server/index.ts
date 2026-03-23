@@ -3,6 +3,8 @@ import { join } from "path";
 import type { MuxProvider } from "../contracts/mux";
 import type { AgentEvent } from "../contracts/agent";
 import { AgentTracker } from "../agents/tracker";
+import { SessionOrder } from "./session-order";
+import { loadConfig, saveConfig } from "../config";
 import {
   type ServerState,
   type SessionData,
@@ -142,6 +144,11 @@ function readEventsFileFallback(tracker: AgentTracker): void {
 
 export function startServer(mux: MuxProvider): void {
   const tracker = new AgentTracker();
+  const sessionOrder = new SessionOrder();
+
+  // Load initial theme from config
+  const config = loadConfig();
+  let currentTheme: string | undefined = typeof config.theme === "string" ? config.theme : undefined;
 
   // Bootstrap active sessions
   const currentSession = mux.getCurrentSession();
@@ -166,13 +173,21 @@ export function startServer(mux: MuxProvider): void {
       return a.name.localeCompare(b.name);
     });
 
+    // Sync custom ordering with current session list
+    sessionOrder.sync(muxSessions.map((s) => s.name));
+
+    // Apply custom ordering
+    const orderedNames = sessionOrder.apply(muxSessions.map((s) => s.name));
+    const sessionByName = new Map(muxSessions.map((s) => [s.name, s]));
+    const orderedMuxSessions = orderedNames.map((n) => sessionByName.get(n)!);
+
     // Batch pane counts if the provider supports it
     let paneCountMap: Map<string, number> | null = null;
     if ("getAllPaneCounts" in mux && typeof (mux as any).getAllPaneCounts === "function") {
       paneCountMap = (mux as any).getAllPaneCounts();
     }
 
-    const sessions: SessionData[] = muxSessions.map(({ name, createdAt, windows, dir }) => {
+    const sessions: SessionData[] = orderedMuxSessions.map(({ name, createdAt, windows, dir }) => {
       const git = getGitInfo(dir);
       const panes = paneCountMap?.get(name) ?? mux.getPaneCount(name);
 
@@ -208,7 +223,7 @@ export function startServer(mux: MuxProvider): void {
       focusedSession = sessions[0]!.name;
     }
 
-    return { type: "state", sessions, focusedSession, currentSession: getCurrentSession(), ts: Date.now() };
+    return { type: "state", sessions, focusedSession, currentSession: getCurrentSession(), theme: currentTheme, ts: Date.now() };
   }
 
   function broadcastState() {
@@ -278,11 +293,15 @@ export function startServer(mux: MuxProvider): void {
         break;
       }
       case "new-session":
-        Bun.spawnSync(["tmux", "new-session", "-d"]); // TODO: add to MuxProvider
+        mux.createSession();
         broadcastState();
         break;
       case "kill-session":
-        Bun.spawnSync(["tmux", "kill-session", "-t", cmd.name]); // TODO: add to MuxProvider
+        mux.killSession(cmd.name);
+        broadcastState();
+        break;
+      case "reorder-session":
+        sessionOrder.reorder(cmd.name, cmd.delta);
         broadcastState();
         break;
       case "refresh":
@@ -296,6 +315,11 @@ export function startServer(mux: MuxProvider): void {
         break;
       case "mark-seen":
         if (tracker.markSeen(cmd.name)) broadcastState();
+        break;
+      case "set-theme":
+        currentTheme = cmd.theme;
+        saveConfig({ theme: cmd.theme });
+        broadcastState();
         break;
     }
   }
