@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
-import type { MuxProvider, MuxSessionInfo } from "../src/contracts/mux";
+import type { MuxProvider, MuxProviderV1, MuxSessionInfo, FullMuxProvider } from "../src/contracts/mux";
+import { isWindowCapable, isSidebarCapable, isBatchCapable, isFullSidebarCapable } from "../src/contracts/mux";
 
 describe("Mux Contract", () => {
   test("MuxSessionInfo has required fields", () => {
@@ -16,9 +17,9 @@ describe("Mux Contract", () => {
     expect(info.windows).toBe(2);
   });
 
-  test("MuxProvider interface has all required methods", () => {
-    // Create a mock that satisfies the interface
+  test("MuxProviderV1 interface has specificationVersion and required methods", () => {
     const mock: MuxProvider = {
+      specificationVersion: "v1",
       name: "test-mux",
       listSessions: () => [],
       switchSession: (_name: string, _clientTty?: string) => {},
@@ -32,6 +33,7 @@ describe("Mux Contract", () => {
       cleanupHooks: () => {},
     };
 
+    expect(mock.specificationVersion).toBe("v1");
     expect(mock.name).toBe("test-mux");
     expect(mock.listSessions()).toEqual([]);
     expect(mock.getCurrentSession()).toBeNull();
@@ -39,8 +41,9 @@ describe("Mux Contract", () => {
     expect(mock.getClientTty()).toBe("");
   });
 
-  test("MuxProvider interface supports optional sidebar methods", () => {
+  test("MuxProvider supports optional capability methods", () => {
     const mock: MuxProvider = {
+      specificationVersion: "v1",
       name: "test-mux",
       listSessions: () => [],
       switchSession: () => {},
@@ -57,7 +60,54 @@ describe("Mux Contract", () => {
       hideSidebar: () => {},
       killSidebarPane: () => {},
       resizeSidebarPane: () => {},
+      cleanupSidebar: () => {},
+      listActiveWindows: () => [],
+      getCurrentWindowId: () => null,
+      getAllPaneCounts: () => new Map(),
     };
     expect(mock.listSidebarPanes!()).toEqual([]);
+    expect(mock.listActiveWindows!()).toEqual([]);
+  });
+
+  test("type guards correctly narrow capabilities", () => {
+    // Minimal provider — no capabilities
+    const minimal: MuxProvider = {
+      specificationVersion: "v1",
+      name: "minimal",
+      listSessions: () => [],
+      switchSession: () => {},
+      getCurrentSession: () => null,
+      getSessionDir: () => "",
+      getPaneCount: () => 1,
+      getClientTty: () => "",
+      createSession: () => {},
+      killSession: () => {},
+      setupHooks: () => {},
+      cleanupHooks: () => {},
+    };
+
+    expect(isWindowCapable(minimal)).toBe(false);
+    expect(isSidebarCapable(minimal)).toBe(false);
+    expect(isBatchCapable(minimal)).toBe(false);
+    expect(isFullSidebarCapable(minimal)).toBe(false);
+
+    // Full provider — all capabilities
+    const full: MuxProvider = {
+      ...minimal,
+      listActiveWindows: () => [],
+      getCurrentWindowId: () => null,
+      listSidebarPanes: () => [],
+      spawnSidebar: () => null,
+      hideSidebar: () => {},
+      killSidebarPane: () => {},
+      resizeSidebarPane: () => {},
+      cleanupSidebar: () => {},
+      getAllPaneCounts: () => new Map(),
+    };
+
+    expect(isWindowCapable(full)).toBe(true);
+    expect(isSidebarCapable(full)).toBe(true);
+    expect(isBatchCapable(full)).toBe(true);
+    expect(isFullSidebarCapable(full)).toBe(true);
   });
 });

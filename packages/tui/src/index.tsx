@@ -15,7 +15,29 @@ import {
   BUILTIN_THEMES,
   resolveTheme,
 } from "@opensessions/core";
-import { TmuxClient } from "@opensessions/tmux-sdk";
+import { TmuxClient } from "@opensessions/mux-tmux";
+
+// Detect which mux we're running inside
+type MuxContext =
+  | { type: "tmux"; sdk: TmuxClient; paneId: string }
+  | { type: "zellij"; sessionName: string; paneId: string }
+  | { type: "none" };
+
+function detectMuxContext(): MuxContext {
+  if (process.env.TMUX_PANE && process.env.TMUX) {
+    return { type: "tmux", sdk: new TmuxClient(), paneId: process.env.TMUX_PANE };
+  }
+  if (process.env.ZELLIJ_SESSION_NAME) {
+    return {
+      type: "zellij",
+      sessionName: process.env.ZELLIJ_SESSION_NAME,
+      paneId: process.env.ZELLIJ_PANE_ID ?? "",
+    };
+  }
+  return { type: "none" };
+}
+
+const muxCtx = detectMuxContext();
 
 const SPINNERS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const UNSEEN_ICON = "●";
@@ -23,20 +45,46 @@ const BOLD = TextAttributes.BOLD;
 const DIM = TextAttributes.DIM;
 
 const THEME_NAMES = Object.keys(BUILTIN_THEMES);
-const sdk = new TmuxClient();
+
+/** Refocus the main (non-sidebar) pane after TUI capability detection finishes.
+ *  This must happen from the TUI process — doing it from start.sh races with
+ *  capability query responses and leaks escape sequences to the main pane. */
+function refocusMainPane() {
+  const windowId = process.env.REFOCUS_WINDOW;
+  if (muxCtx.type === "tmux" && windowId) {
+    try {
+      const r = Bun.spawnSync(
+        ["tmux", "list-panes", "-t", windowId, "-F", "#{pane_id} #{pane_title}"],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      const lines = r.stdout.toString().trim().split("\n");
+      const main = lines.find((l) => !l.includes("opensessions"));
+      if (main) {
+        const paneId = main.split(" ")[0];
+        Bun.spawnSync(["tmux", "select-pane", "-t", paneId], { stdout: "pipe", stderr: "pipe" });
+      }
+    } catch {}
+  } else if (muxCtx.type === "zellij") {
+    // Zellij: move focus to the right (away from the sidebar on the left)
+    try {
+      Bun.spawnSync(["zellij", "action", "move-focus", "right"], { stdout: "pipe", stderr: "pipe" });
+    } catch {}
+  }
+}
 
 function getClientTty(): string {
-  // Initial best-effort — will be replaced by server-provided TTY from hooks
-  const paneId = process.env.TMUX_PANE;
-  if (paneId) {
+  if (muxCtx.type === "tmux") {
+    const { sdk, paneId } = muxCtx;
     const sessName = sdk.display("#{session_name}", { target: paneId });
     if (sessName) {
       const clients = sdk.listClients();
       const client = clients.find((c) => c.sessionName === sessName);
       if (client) return client.tty;
     }
+    return sdk.getClientTty();
   }
-  return sdk.getClientTty();
+  // Zellij doesn't expose client TTY
+  return "";
 }
 
 function App() {
@@ -49,6 +97,7 @@ function App() {
 
   const [sessions, setSessions] = createStore<SessionData[]>([]);
   const [focusedSession, setFocusedSession] = createSignal<string | null>(null);
+  const [currentSession, setCurrentSession] = createSignal<string | null>(null);
   const [mySession, setMySession] = createSignal<string | null>(null);
   const [connected, setConnected] = createSignal(false);
   const [spinIdx, setSpinIdx] = createSignal(0);
@@ -71,11 +120,14 @@ function App() {
   }
 
   function reIdentify() {
-    const paneId = process.env.TMUX_PANE;
-    if (!paneId) return;
-    // Re-query session (pane may have moved), server replies with your-session + clientTty
-    const sessName = sdk.display("#{session_name}", { target: paneId });
-    if (sessName) send({ type: "identify-pane", paneId, sessionName: sessName });
+    if (muxCtx.type === "tmux") {
+      const { sdk, paneId } = muxCtx;
+      const sessName = sdk.display("#{session_name}", { target: paneId });
+      if (sessName) send({ type: "identify-pane", paneId, sessionName: sessName });
+    } else if (muxCtx.type === "zellij") {
+      const sessName = process.env.ZELLIJ_SESSION_NAME;
+      if (sessName) send({ type: "identify-pane", paneId: muxCtx.paneId, sessionName: sessName });
+    }
   }
 
   function moveLocalFocus(delta: -1 | 1) {
@@ -98,6 +150,7 @@ function App() {
   }
 
   function spawnSessionizer() {
+    if (muxCtx.type !== "tmux") return; // Only works in tmux for now
     renderer.destroy();
     const proc = Bun.spawnSync(["/usr/local/bin/tmux-sessionizer"], {
       stdin: "inherit",
@@ -113,6 +166,23 @@ function App() {
   }
 
   onMount(() => {
+    // Refocus the main pane once terminal capability detection finishes.
+    // This avoids the race where start.sh refocuses too early and capability
+    // responses leak as garbage text into the main pane.
+    let refocused = false;
+    const doRefocus = () => {
+      if (refocused) return;
+      refocused = true;
+      refocusMainPane();
+    };
+    renderer.on("capabilities", doRefocus);
+    // Fallback: if no capability response arrives within 2s, refocus anyway
+    const refocusTimeout = setTimeout(doRefocus, 2000);
+    onCleanup(() => {
+      clearTimeout(refocusTimeout);
+      renderer.removeListener("capabilities", doRefocus);
+    });
+
     const socket = new WebSocket(`ws://${SERVER_HOST}:${SERVER_PORT}`);
     ws = socket;
 
@@ -120,10 +190,13 @@ function App() {
       setConnected(true);
       const tty = clientTty();
       if (tty) send({ type: "identify", clientTty: tty });
-      const paneId = process.env.TMUX_PANE;
-      if (paneId) {
+      if (muxCtx.type === "tmux") {
+        const { sdk, paneId } = muxCtx;
         const sessName = sdk.display("#{session_name}", { target: paneId });
         if (sessName) send({ type: "identify-pane", paneId, sessionName: sessName });
+      } else if (muxCtx.type === "zellij") {
+        const sessName = process.env.ZELLIJ_SESSION_NAME;
+        if (sessName) send({ type: "identify-pane", paneId: muxCtx.paneId, sessionName: sessName });
       }
     };
 
@@ -134,9 +207,11 @@ function App() {
           if (msg.type === "state") {
             setSessions(reconcile(msg.sessions, { key: "name" }));
             setFocusedSession(msg.focusedSession);
+            setCurrentSession(msg.currentSession);
             setTheme(resolveTheme(msg.theme));
           } else if (msg.type === "focus") {
             setFocusedSession(msg.focusedSession);
+            setCurrentSession(msg.currentSession);
           } else if (msg.type === "your-session") {
             setMySession(msg.name);
             if (msg.clientTty) setClientTty(msg.clientTty);

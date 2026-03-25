@@ -24,10 +24,42 @@
     "packages/core": {
       "name": "@opensessions/core",
       "version": "0.1.0",
+      "dependencies": {
+        "@opensessions/mux": "workspace:*",
+      },
       "devDependencies": {
-        "@opensessions/tmux": "workspace:*",
-        "@opensessions/tmux-sdk": "workspace:*",
-        "@opensessions/zellij": "workspace:*",
+        "@opensessions/mux-tmux": "workspace:*",
+        "@opensessions/mux-zellij": "workspace:*",
+        "@types/bun": "latest",
+        "typescript": "^5",
+      },
+    },
+    "packages/mux": {
+      "name": "@opensessions/mux",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5",
+      },
+    },
+    "packages/mux-tmux": {
+      "name": "@opensessions/mux-tmux",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opensessions/mux": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5",
+      },
+    },
+    "packages/mux-zellij": {
+      "name": "@opensessions/mux-zellij",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opensessions/mux": "workspace:*",
+      },
+      "devDependencies": {
         "@types/bun": "latest",
         "typescript": "^5",
       },
@@ -45,7 +77,9 @@
       "version": "0.1.0",
       "dependencies": {
         "@opensessions/core": "workspace:*",
-        "@opensessions/tmux-sdk": "workspace:*",
+        "@opensessions/mux": "workspace:*",
+        "@opensessions/mux-tmux": "workspace:*",
+        "@opensessions/mux-zellij": "workspace:*",
         "@opentui/core": "^0.1.88",
         "@opentui/solid": "^0.1.88",
         "solid-js": "^1.9.11",
@@ -194,6 +228,12 @@
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
     "@opensessions/core": ["@opensessions/core@workspace:packages/core"],
+
+    "@opensessions/mux": ["@opensessions/mux@workspace:packages/mux"],
+
+    "@opensessions/mux-tmux": ["@opensessions/mux-tmux@workspace:packages/mux-tmux"],
+
+    "@opensessions/mux-zellij": ["@opensessions/mux-zellij@workspace:packages/mux-zellij"],
 
     "@opensessions/tmux": ["@opensessions/tmux@workspace:tmux-plugin"],
 

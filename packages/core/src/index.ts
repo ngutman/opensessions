@@ -1,4 +1,22 @@
-export type { MuxProvider, MuxSessionInfo } from "./contracts/mux";
+export type {
+  MuxProvider,
+  MuxProviderV1,
+  MuxSessionInfo,
+  ActiveWindow,
+  SidebarPane,
+  SidebarPosition,
+  WindowCapable,
+  SidebarCapable,
+  BatchCapable,
+  FullMuxProvider,
+  MuxProviderSettings,
+} from "./contracts/mux";
+export {
+  isWindowCapable,
+  isSidebarCapable,
+  isBatchCapable,
+  isFullSidebarCapable,
+} from "./contracts/mux";
 export type { AgentStatus, AgentEvent } from "./contracts/agent";
 export { TERMINAL_STATUSES } from "./contracts/agent";
 export { AgentTracker } from "./agents/tracker";

@@ -1,19 +1,13 @@
 {
-  "name": "@opensessions/core",
+  "name": "@opensessions/mux-tmux",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
-  "scripts": {
-    "test": "bun test",
-    "build": "bun run build.ts"
-  },
   "dependencies": {
     "@opensessions/mux": "workspace:*"
   },
   "devDependencies": {
-    "@opensessions/mux-tmux": "workspace:*",
-    "@opensessions/mux-zellij": "workspace:*",
     "@types/bun": "latest",
     "typescript": "^5"
   }

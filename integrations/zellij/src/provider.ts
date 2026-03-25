@@ -1,4 +1,13 @@
 import type { MuxProvider, MuxSessionInfo } from "@opensessions/core";
+import { appendFileSync } from "fs";
+
+const SIDEBAR_PANE_NAME = "opensessions";
+
+function plog(msg: string, data?: Record<string, unknown>) {
+  const ts = new Date().toISOString().slice(11, 23);
+  const extra = data ? " " + JSON.stringify(data) : "";
+  try { appendFileSync("/tmp/opensessions-debug.log", `[${ts}] [zellij] ${msg}${extra}\n`); } catch {}
+}
 
 function run(cmd: string[]): string {
   try {
@@ -7,6 +16,16 @@ function run(cmd: string[]): string {
   } catch {
     return "";
   }
+}
+
+function runInSession(session: string, args: string[]): string {
+  return run(["zellij", "--session", session, "action", ...args]);
+}
+
+function runInSessionJSON<T>(session: string, args: string[]): T | null {
+  const raw = runInSession(session, args);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as T; } catch { return null; }
 }
 
 function runJSON<T>(cmd: string[]): T | null {
@@ -102,23 +121,25 @@ export class ZellijProvider implements MuxProvider {
         stdout: "pipe",
         stderr: "pipe",
       });
-    } else {
-      // Outside zellij (e.g. from tmux) — open in a new tmux window
-      // Use full paths since server may have limited PATH
-      const tmux = process.env.TMUX ? "tmux" : "/opt/homebrew/bin/tmux";
+    } else if (process.env.TMUX) {
+      // Inside tmux — detach the client and replace it with zellij attach
+      // -E runs a shell command to replace the tmux client process
       const zellijBin = "/opt/homebrew/bin/zellij";
-      const result = Bun.spawnSync([tmux, "new-window", "-n", name, `${zellijBin} attach ${name}`], {
+      const tty = _clientTty;
+      const args = ["detach-client"];
+      if (tty) args.push("-t", tty);
+      args.push("-E", `${zellijBin} attach ${name}`);
+      Bun.spawnSync(["tmux", ...args], {
         stdout: "pipe",
         stderr: "pipe",
         env: { ...process.env, PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH ?? ""}` },
       });
-      if (result.exitCode !== 0) {
-        // Fallback: try just attaching
-        Bun.spawnSync([zellijBin, "attach", name], {
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-      }
+    } else {
+      // Outside any mux — just attach directly
+      Bun.spawnSync(["zellij", "attach", name], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
     }
   }
 

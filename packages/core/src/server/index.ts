@@ -1,11 +1,11 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync, appendFileSync, watch, type FSWatcher } from "fs";
 import { join } from "path";
 import type { MuxProvider } from "../contracts/mux";
+import { isFullSidebarCapable, isBatchCapable } from "../contracts/mux";
 import type { AgentEvent } from "../contracts/agent";
 import { AgentTracker } from "../agents/tracker";
 import { SessionOrder } from "./session-order";
 import { loadConfig, saveConfig } from "../config";
-import { TmuxClient } from "@opensessions/tmux-sdk";
 import {
   type ServerState,
   type SessionData,
@@ -158,7 +158,6 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[]): v
   const allProviders = [mux, ...(extraProviders ?? [])];
   const tracker = new AgentTracker();
   const sessionOrder = new SessionOrder();
-  const sdk = new TmuxClient();
 
   // Clear previous log on server start
   try { writeFileSync(DEBUG_LOG, ""); } catch {}
@@ -201,16 +200,16 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[]): v
   const clientTtyBySession = new Map<string, string>();
 
   function getCurrentSession(): string | null {
-    const result = mux.getCurrentSession();
-    if (!result) {
-      // Fallback: try direct tmux command (works even from background processes)
-      const out = sdk.run(["list-clients", "-F", "#{client_session}"]);
-      const first = out.stdout.split("\n")[0]?.trim() || null;
-      log("getCurrentSession", "mux returned null, fallback", { fallback: first });
-      return first;
+    // Try all providers until one returns a session
+    for (const p of allProviders) {
+      const result = p.getCurrentSession();
+      if (result) {
+        log("getCurrentSession", "result", { result, provider: p.name });
+        return result;
+      }
     }
-    log("getCurrentSession", "result", { result });
-    return result;
+    log("getCurrentSession", "no provider returned a session");
+    return null;
   }
 
   function computeState(): ServerState {
@@ -234,11 +233,11 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[]): v
     const sessionByName = new Map(allMuxSessions.map((s) => [s.name, s]));
     const orderedMuxSessions = orderedNames.map((n) => sessionByName.get(n)!);
 
-    // Batch pane counts per provider
+    // Batch pane counts per provider (uses BatchCapable type guard)
     const paneCountMaps = new Map<MuxProvider, Map<string, number>>();
     for (const p of allProviders) {
-      if ("getAllPaneCounts" in p && typeof (p as any).getAllPaneCounts === "function") {
-        paneCountMaps.set(p, (p as any).getAllPaneCounts());
+      if (isBatchCapable(p)) {
+        paneCountMaps.set(p, p.getAllPaneCounts());
       }
     }
 
@@ -333,19 +332,8 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[]): v
 
   // --- Sidebar management ---
 
-  function getProviderWithSidebar(): MuxProvider & {
-    listSidebarPanes: NonNullable<MuxProvider["listSidebarPanes"]>;
-    spawnSidebar: NonNullable<MuxProvider["spawnSidebar"]>;
-    hideSidebar: NonNullable<MuxProvider["hideSidebar"]>;
-    killSidebarPane: NonNullable<MuxProvider["killSidebarPane"]>;
-    resizeSidebarPane: NonNullable<MuxProvider["resizeSidebarPane"]>;
-  } | null {
-    for (const p of allProviders) {
-      if (p.listSidebarPanes && p.spawnSidebar && p.hideSidebar && p.killSidebarPane && p.resizeSidebarPane) {
-        return p as any;
-      }
-    }
-    return null;
+  function getProvidersWithSidebar() {
+    return allProviders.filter(isFullSidebarCapable);
   }
 
   /** Parse "clientTty|session|windowId" or legacy "session:windowId" context from POST body */
@@ -374,55 +362,62 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[]): v
   let spawningInProgress = false;
 
   function toggleSidebar(ctx?: { session: string; windowId: string }): void {
-    const p = getProviderWithSidebar();
-    if (!p) {
-      log("toggle", "SKIP — no provider with sidebar methods");
+    const providers = getProvidersWithSidebar();
+    if (providers.length === 0) {
+      log("toggle", "SKIP — no providers with sidebar methods");
       return;
     }
 
     if (sidebarVisible) {
-      const panes = p.listSidebarPanes();
-      log("toggle", "OFF — hiding panes (break-pane)", { count: panes.length, panes: panes.map((x) => x.paneId) });
-      for (const pane of panes) {
-        p.hideSidebar(pane.paneId);
+      for (const p of providers) {
+        const panes = p.listSidebarPanes();
+        log("toggle", "OFF — hiding panes", { provider: p.name, count: panes.length });
+        for (const pane of panes) {
+          p.hideSidebar(pane.paneId);
+        }
       }
       sidebarVisible = false;
     } else {
       sidebarVisible = true;
-      // Spawn/restore sidebar in ALL sessions' active windows at once (one entity)
-      const allWindows = sdk.listWindows();
-      const activeWindows = allWindows.filter((w) => w.active && w.sessionName !== "_os_stash");
-      log("toggle", "ON — spawning in all active windows", { count: activeWindows.length });
-      for (const w of activeWindows) {
-        ensureSidebarInWindow(p, { session: w.sessionName, windowId: w.id });
+      for (const p of providers) {
+        const allWindows = p.listActiveWindows();
+        log("toggle", "ON — spawning in active windows", { provider: p.name, count: allWindows.length });
+        for (const w of allWindows) {
+          ensureSidebarInWindow(p, { session: w.sessionName, windowId: w.id });
+        }
       }
-      // Enforce correct width on all restored/spawned panes
       resizeSidebars();
-      // Tell all TUIs to re-identify (panes may have moved between sessions)
       server.publish("sidebar", JSON.stringify({ type: "re-identify" }));
     }
     log("toggle", "done", { sidebarVisible });
   }
 
-  function ensureSidebarInWindow(p?: ReturnType<typeof getProviderWithSidebar>, ctx?: { session: string; windowId: string }): void {
-    p = p ?? getProviderWithSidebar();
+  function ensureSidebarInWindow(provider?: ReturnType<typeof getProvidersWithSidebar>[number], ctx?: { session: string; windowId: string }): void {
+    // If no specific provider, try to find one for the session
+    const p = provider ?? (() => {
+      const providers = getProvidersWithSidebar();
+      if (ctx?.session) {
+        const sessionProvider = sessionProviders.get(ctx.session);
+        return providers.find((pp) => pp === sessionProvider) ?? providers[0];
+      }
+      return providers[0];
+    })();
     if (!p || !sidebarVisible) {
       log("ensure", "SKIP", { hasProvider: !!p, sidebarVisible });
       return;
     }
     if (spawningInProgress) {
-      log("ensure", "SKIP — spawn already in progress (re-entrant guard)");
+      log("ensure", "SKIP — spawn already in progress");
       return;
     }
 
-    // Use provided context, fall back to querying tmux (unreliable from background)
     const curSession = ctx?.session ?? getCurrentSession();
     if (!curSession) {
       log("ensure", "SKIP — no current session");
       return;
     }
 
-    const windowId = ctx?.windowId ?? sdk.getCurrentWindowId();
+    const windowId = ctx?.windowId ?? p.getCurrentWindowId();
     if (!windowId) {
       log("ensure", "SKIP — could not get window_id");
       return;
@@ -444,27 +439,25 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[]): v
       } finally {
         spawningInProgress = false;
       }
-      // Enforce width on ALL sidebar panes after spawn (layout may have adjusted sizes)
       resizeSidebars();
     }
   }
 
   function quitAll(): void {
     log("quit", "killing all sidebar panes");
-    const p = getProviderWithSidebar();
-    if (p) {
+    for (const p of getProvidersWithSidebar()) {
       const panes = p.listSidebarPanes();
-      log("quit", "found panes to kill", { count: panes.length });
+      log("quit", "found panes to kill", { provider: p.name, count: panes.length });
       for (const pane of panes) {
         p.killSidebarPane(pane.paneId);
       }
     }
-    // Kill the stash session (holds hidden sidebar panes)
-    sdk.run(["kill-session", "-t", "_os_stash"]);
-    // Broadcast quit to all TUI clients
+    // Provider-specific cleanup (uses type guard)
+    for (const p of getProvidersWithSidebar()) {
+      p.cleanupSidebar();
+    }
     server.publish("sidebar", JSON.stringify({ type: "quit" }));
     sidebarVisible = false;
-    // Clean up and exit
     cleanup();
     process.exit(0);
   }
@@ -472,11 +465,9 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[]): v
   // --- Sidebar resize enforcement ---
 
   function resizeSidebars() {
-    // Enforce sidebar width on all panes (after terminal resize, etc.)
-    const p = getProviderWithSidebar();
-    if (p) {
+    for (const p of getProvidersWithSidebar()) {
       const panes = p.listSidebarPanes();
-      log("resize", "enforcing width on all panes", { sidebarWidth, count: panes.length });
+      log("resize", "enforcing width on all panes", { provider: p.name, sidebarWidth, count: panes.length });
       for (const pane of panes) {
         p.resizeSidebarPane(pane.paneId, sidebarWidth);
       }
@@ -495,7 +486,44 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[]): v
           ?? cmd.clientTty ?? clientTtys.get(ws);
         log("switch-session", "switching", { target: cmd.name, tty, clientSess });
         const p = sessionProviders.get(cmd.name) ?? mux;
+
+        // Detect cross-mux switch (e.g., zellij→tmux or tmux→zellij)
+        const sourceProvider = clientSess ? sessionProviders.get(clientSess) : null;
+        if (sourceProvider && sourceProvider.name !== p.name) {
+          log("switch-session", "cross-mux detected", {
+            source: sourceProvider.name, target: p.name, sourceSession: clientSess,
+          });
+          if (sourceProvider.name === "zellij" && p.name === "tmux") {
+            // Write reattach target for the bash wrapper
+            writeFileSync("/tmp/opensessions-reattach", cmd.name);
+            // Detach from zellij — the wrapper script will auto-attach to tmux
+            Bun.spawnSync(["zellij", "--session", clientSess!, "action", "detach"], {
+              stdout: "pipe", stderr: "pipe",
+            });
+            break; // Don't call p.switchSession — the wrapper handles it
+          }
+        }
+
         p.switchSession(cmd.name, tty);
+
+        // Auto-ensure sidebar in the target session if sidebar is visible.
+        // In tmux, hooks handle this — but zellij has no hooks, so we do it here.
+        // Use listActiveWindows() to find the target session's active tab
+        // (getCurrentWindowId() won't work from the server since ZELLIJ_SESSION_NAME isn't set).
+        if (sidebarVisible && isFullSidebarCapable(p)) {
+          const activeWindows = p.listActiveWindows();
+          const targetWindow = activeWindows.find((w) => w.sessionName === cmd.name);
+          log("switch-session", "auto-ensure sidebar", {
+            target: cmd.name, provider: p.name,
+            activeWindows: activeWindows.length, targetWindow: targetWindow?.id ?? null,
+          });
+          if (targetWindow) {
+            // 1.5s delay — zellij needs time to attach the client before we can spawn panes
+            setTimeout(() => {
+              ensureSidebarInWindow(p, { session: cmd.name, windowId: targetWindow.id });
+            }, 1500);
+          }
+        }
         break;
       }
       case "switch-index": {
@@ -505,6 +533,16 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[]): v
           const name = lastState.sessions[idx]!.name;
           const p = sessionProviders.get(name) ?? mux;
           p.switchSession(name);
+
+          if (sidebarVisible && isFullSidebarCapable(p)) {
+            const activeWindows = p.listActiveWindows();
+            const targetWindow = activeWindows.find((w) => w.sessionName === name);
+            if (targetWindow) {
+              setTimeout(() => {
+                ensureSidebarInWindow(p, { session: name, windowId: targetWindow.id });
+              }, 500);
+            }
+          }
         }
         break;
       }

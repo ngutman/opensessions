@@ -7,7 +7,7 @@ const config = loadConfig();
 const loader = new PluginLoader();
 
 // 1. Load mux plugins (live outside core, register via plugin factory)
-for (const pkg of ["@opensessions/tmux", "@opensessions/zellij"]) {
+for (const pkg of ["@opensessions/mux-tmux", "@opensessions/mux-zellij"]) {
   try {
     const mod = require(pkg);
     const factory = typeof mod.default === "function" ? mod.default : mod;
