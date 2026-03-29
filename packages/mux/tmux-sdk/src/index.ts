@@ -347,6 +347,10 @@ export class TmuxClient {
     this.run(["select-pane", "-t", target]);
   }
 
+  setPaneStyle(target: string, style: string): void {
+    this.run(["select-pane", "-t", target, "-P", style]);
+  }
+
   setPaneTitle(target: string, title: string): void {
     this.run(["select-pane", "-t", target, "-T", title]);
   }

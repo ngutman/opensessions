@@ -34,6 +34,7 @@ function rawTmux(args: string[]): string {
 }
 
 const STASH_SESSION = "_os_stash";
+const SIDEBAR_PANE_TITLE = "opensessions-sidebar";
 
 export class TmuxProvider implements MuxProviderV1, WindowCapable, SidebarCapable, BatchCapable {
   readonly specificationVersion = "v1" as const;
@@ -151,7 +152,7 @@ export class TmuxProvider implements MuxProviderV1, WindowCapable, SidebarCapabl
     }
 
     return panes
-      .filter((p) => p.title === "opensessions" && p.sessionName !== STASH_SESSION)
+      .filter((p) => p.title === SIDEBAR_PANE_TITLE && p.sessionName !== STASH_SESSION)
       .map((p) => ({
         paneId: p.id,
         sessionName: p.sessionName,
@@ -188,12 +189,12 @@ export class TmuxProvider implements MuxProviderV1, WindowCapable, SidebarCapabl
     // --- Try to restore a stashed sidebar pane ---
     try {
       const stashPanes = tmux.listPanes({ scope: "session", target: STASH_SESSION });
-      const stashedPane = stashPanes.find((p) => p.title === "opensessions");
+      const stashedPane = stashPanes.find((p) => p.title === SIDEBAR_PANE_TITLE);
       if (stashedPane) {
         plog("spawnSidebar: restoring from stash", { paneId: stashedPane.id, target: targetPane.id });
         const joinFlag = position === "left" ? "-hb" : "-h";
         rawTmux(["join-pane", joinFlag, "-f", "-l", String(width), "-s", stashedPane.id, "-t", targetPane.id]);
-        tmux.setPaneTitle(stashedPane.id, "opensessions");
+        tmux.setPaneTitle(stashedPane.id, SIDEBAR_PANE_TITLE);
         tmux.selectPane(targetPane.id);
         return stashedPane.id;
       }
@@ -215,7 +216,7 @@ export class TmuxProvider implements MuxProviderV1, WindowCapable, SidebarCapabl
       return null;
     }
 
-    tmux.setPaneTitle(newPane.id, "opensessions");
+    tmux.setPaneTitle(newPane.id, SIDEBAR_PANE_TITLE);
     // Do NOT selectPane here for fresh spawns — the TUI's refocusMainPane()
     // handles it after terminal capability detection finishes. Refocusing
     // immediately causes capability query responses (DECRPM, DA1, Kitty

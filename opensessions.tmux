@@ -8,8 +8,6 @@
 #   3. Requires: bun (https://bun.sh)
 #
 # Options (set before TPM init):
-#   @opensessions-key       "s"    — prefix + key to toggle sidebar
-#   @opensessions-focus-key "S"    — prefix + key to reveal and focus sidebar
 #   @opensessions-prefix-key        "o"  — prefix + key to enter opensessions command table
 #   @opensessions-prefix-focus-key  "s"  — command-table key to reveal and focus sidebar
 #   @opensessions-prefix-toggle-key "t"  — command-table key to toggle sidebar
@@ -31,8 +29,6 @@ get_option() {
   echo "${value:-$default}"
 }
 
-KEY=$(get_option "@opensessions-key" "s")
-FOCUS_KEY=$(get_option "@opensessions-focus-key" "S")
 PREFIX_KEY=$(get_option "@opensessions-prefix-key" "o")
 PREFIX_FOCUS_KEY=$(get_option "@opensessions-prefix-focus-key" "s")
 PREFIX_TOGGLE_KEY=$(get_option "@opensessions-prefix-toggle-key" "t")
@@ -41,13 +37,6 @@ FOCUS_GLOBAL_KEY=$(get_option "@opensessions-focus-global-key" "")
 INDEX_KEYS=$(get_option "@opensessions-index-keys" "")
 WIDTH=$(get_option "@opensessions-width" "26")
 COMMAND_TABLE="opensessions"
-
-bind_prefixed_key() {
-  local key="$1"
-  local command="$2"
-  [ -n "$key" ] || return
-  tmux bind-key "$key" run-shell "$command"
-}
 
 bind_global_key() {
   local key="$1"
@@ -106,8 +95,6 @@ if [ ! -d "$CURRENT_DIR/node_modules" ]; then
 fi
 
 # --- Bind tmux shortcuts ---
-bind_prefixed_key "$KEY" "sh '$SCRIPTS_DIR/toggle.sh'"
-bind_prefixed_key "$FOCUS_KEY" "sh '$SCRIPTS_DIR/focus.sh'"
 bind_command_table
 bind_global_key "$FOCUS_GLOBAL_KEY" "sh '$SCRIPTS_DIR/focus.sh'"
 bind_index_keys

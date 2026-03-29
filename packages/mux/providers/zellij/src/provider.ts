@@ -16,7 +16,7 @@ export interface ZellijProviderSettings {
   name?: string;
 }
 
-const SIDEBAR_PANE_NAME = "opensessions";
+const SIDEBAR_PANE_NAME = "opensessions-sidebar";
 
 function plog(msg: string, data?: Record<string, unknown>) {
   const ts = new Date().toISOString().slice(11, 23);
@@ -260,7 +260,7 @@ export class ZellijProvider implements MuxProviderV1, WindowCapable, SidebarCapa
     if (!panes) return [];
     const tabWidths = new Map((tabs ?? []).map((tab) => [String(tab.tab_id), tab.viewport_columns]));
     return panes
-      .filter((p) => !p.is_plugin && p.title === "opensessions")
+      .filter((p) => !p.is_plugin && p.title === "opensessions-sidebar")
       .map((p) => ({
         paneId: `terminal_${p.id}`,
         sessionName: session,
@@ -285,7 +285,7 @@ export class ZellijProvider implements MuxProviderV1, WindowCapable, SidebarCapa
     // To get a sidebar on the left: create pane to the right, then move it left.
     const paneId = run(["zellij", "--session", sessionName, "action", "new-pane",
       "-d", "right",
-      "-n", "opensessions",
+      "-n", SIDEBAR_PANE_NAME,
       "--close-on-exit",
       "--cwd", `${repoDir}/apps/tui`,
       "--", "bash", startScript,

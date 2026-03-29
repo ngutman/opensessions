@@ -323,6 +323,19 @@ const MATRIX: Theme = {
   icons: CATPPUCCIN_MOCHA.icons,
 };
 
+const TRANSPARENT: Theme = {
+  palette: {
+    blue: "#89b4fa", lavender: "#b4befe", pink: "#cba6f7", mauve: "#cba6f7",
+    yellow: "#f9e2af", green: "#a6e3a1", red: "#f38ba8", peach: "#fab387",
+    teal: "#94e2d5", sky: "#89dceb", text: "#cdd6f4", subtext0: "#a6adc8",
+    subtext1: "#bac2de", overlay0: "#6c7086", overlay1: "#7f849c",
+    surface0: "#313244", surface1: "#45475a", surface2: "#585b70",
+    base: "transparent", mantle: "transparent", crust: "transparent",
+  },
+  status: CATPPUCCIN_MOCHA.status,
+  icons: CATPPUCCIN_MOCHA.icons,
+};
+
 export const BUILTIN_THEMES: Record<string, Theme> = {
   "catppuccin-mocha": CATPPUCCIN_MOCHA,
   "catppuccin-latte": CATPPUCCIN_LATTE,
@@ -342,6 +355,7 @@ export const BUILTIN_THEMES: Record<string, Theme> = {
   "ayu": AYU,
   "aura": AURA,
   "matrix": MATRIX,
+  "transparent": TRANSPARENT,
 };
 
 export const DEFAULT_THEME = "catppuccin-mocha";

@@ -46,7 +46,7 @@ export function determineStatus(msg: MessageData | null, parts: PartData[]): Age
   if (msg.role === "assistant") {
     if (msg.finish === "tool-calls") return "running";
     if (parts.some((p) => p.type === "tool")) return "running";
-    return "waiting";
+    return "done";
   }
 
   if (msg.role === "user") return "running";
@@ -109,7 +109,7 @@ export class OpenCodeAgentWatcher implements AgentWatcher {
       if (!this.openDb()) return;
 
       let sessions: SessionRow[];
-      const staleThreshold = Math.floor((Date.now() - STALE_MS) / 1000);
+      const staleThreshold = Date.now() - STALE_MS;
       try {
         sessions = this.db.query(
           `SELECT id, title, directory, time_updated FROM session WHERE time_updated > ? ORDER BY time_updated DESC`,
@@ -120,13 +120,52 @@ export class OpenCodeAgentWatcher implements AgentWatcher {
         return;
       }
 
-      // First poll: just record timestamps, don't emit — we can't know if
-      // OpenCode is actually running from historical DB state alone.
+      // First poll: record timestamps, then emit current state for recent sessions.
       if (!this.seeded) {
         for (const row of sessions) {
           this.sessionTimestamps.set(row.id, row.time_updated);
         }
         this.seeded = true;
+
+        // Emit seeded sessions by reading their current status (like amp watcher does)
+        for (const row of sessions) {
+          let lastMsg: MessageRow | null = null;
+          let lastParts: PartData[] = [];
+          try {
+            lastMsg = this.db.query(
+              `SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1`,
+            ).get(row.id);
+            if (lastMsg) {
+              const partRows: { data: string }[] = this.db.query(
+                `SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC`,
+              ).all(lastMsg.id);
+              for (const pr of partRows) {
+                try { lastParts.push(JSON.parse(pr.data)); } catch {}
+              }
+            }
+          } catch { continue; }
+
+          let lastMsgData: MessageData | null = null;
+          if (lastMsg) {
+            try { lastMsgData = JSON.parse(lastMsg.data); } catch {}
+          }
+
+          const status = determineStatus(lastMsgData, lastParts);
+          if (status === "idle") continue;
+          this.sessionStatuses.set(row.id, status);
+
+          const session = this.ctx.resolveSession(row.directory);
+          if (!session) continue;
+
+          this.ctx.emit({
+            agent: "opencode",
+            session,
+            status,
+            ts: Date.now(),
+            threadId: row.id,
+            ...(row.title && { threadName: row.title }),
+          });
+        }
         return;
       }
 

@@ -309,7 +309,23 @@ export class CodexAgentWatcher implements AgentWatcher {
         await this.processFile(filePath);
       }
     } finally {
-      if (!this.seeded) this.seeded = true;
+      if (!this.seeded) {
+        this.seeded = true;
+        // Emit seeded sessions with non-idle status (like amp watcher does)
+        for (const [threadId, snapshot] of this.sessions) {
+          if (snapshot.status === "idle" || !snapshot.projectDir) continue;
+          const session = this.ctx?.resolveSession(snapshot.projectDir);
+          if (!session) continue;
+          this.ctx?.emit({
+            agent: "codex",
+            session,
+            status: snapshot.status,
+            ts: Date.now(),
+            threadId,
+            ...(snapshot.threadName && { threadName: snapshot.threadName }),
+          });
+        }
+      }
       this.scanning = false;
     }
   }

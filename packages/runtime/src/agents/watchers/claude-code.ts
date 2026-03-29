@@ -41,6 +41,7 @@ interface SessionState {
 }
 
 const POLL_MS = 2000;
+const STALE_MS = 5 * 60 * 1000;
 
 // --- Status detection ---
 
@@ -57,7 +58,7 @@ export function determineStatus(entry: JournalEntry): AgentStatus {
 
   if (msg.role === "assistant") {
     const hasToolUse = items.some((c) => c.type === "tool_use");
-    return hasToolUse ? "running" : "waiting";
+    return hasToolUse ? "running" : "done";
   }
 
   if (msg.role === "user") return "running";
@@ -70,14 +71,18 @@ function extractThreadName(entry: JournalEntry): string | undefined {
   if (msg?.role !== "user") return undefined;
 
   const content = msg.content;
-  if (typeof content === "string") return content.slice(0, 80);
+  let text: string | undefined;
 
-  if (Array.isArray(content)) {
-    const textItem = content.find((c) => c.type === "text" && c.text);
-    return textItem?.text?.slice(0, 80);
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    text = content.find((c) => c.type === "text" && c.text)?.text;
   }
 
-  return undefined;
+  if (!text) return undefined;
+  // Skip system/internal messages
+  if (text.startsWith("<") || text.startsWith("{")) return undefined;
+  return text.slice(0, 80);
 }
 
 /** Decode Claude's encoded project dir name back to a path */
@@ -127,9 +132,28 @@ export class ClaudeCodeAgentWatcher implements AgentWatcher {
 
     if (prev && size === prev.fileSize) return;
 
-    // Seed mode: record file sizes without reading/emitting
+    // Seed mode: read last entry to capture real status for post-seed emit
     if (!this.seeded) {
-      this.sessions.set(threadId, { status: "idle", fileSize: size, projectDir });
+      let text: string;
+      try {
+        text = await Bun.file(filePath).text();
+      } catch { return; }
+
+      const lines = text.split("\n").filter(Boolean);
+      let latestStatus: AgentStatus = "idle";
+      let threadName: string | undefined;
+
+      for (const line of lines) {
+        let entry: JournalEntry;
+        try { entry = JSON.parse(line); } catch { continue; }
+        if (!threadName) {
+          const name = extractThreadName(entry);
+          if (name) threadName = name;
+        }
+        latestStatus = determineStatus(entry);
+      }
+
+      this.sessions.set(threadId, { status: latestStatus, fileSize: size, threadName, projectDir });
       return;
     }
 
@@ -185,6 +209,7 @@ export class ClaudeCodeAgentWatcher implements AgentWatcher {
     try {
       let dirs: string[];
       try { dirs = await readdir(this.projectsDir); } catch { return; }
+      const now = Date.now();
 
       for (const dir of dirs) {
         const dirPath = join(this.projectsDir, dir);
@@ -197,11 +222,31 @@ export class ClaudeCodeAgentWatcher implements AgentWatcher {
 
         for (const file of files) {
           if (!file.endsWith(".jsonl")) continue;
-          await this.processFile(join(dirPath, file), projectDir);
+          const filePath = join(dirPath, file);
+          let fileStat;
+          try { fileStat = await stat(filePath); } catch { continue; }
+          if (now - fileStat.mtimeMs > STALE_MS) continue;
+          await this.processFile(filePath, projectDir);
         }
       }
     } finally {
-      if (!this.seeded) this.seeded = true;
+      if (!this.seeded) {
+        this.seeded = true;
+        // Emit seeded sessions with non-idle status (like amp watcher does)
+        for (const [threadId, state] of this.sessions) {
+          if (state.status === "idle" || !state.projectDir) continue;
+          const session = this.ctx?.resolveSession(state.projectDir);
+          if (!session) continue;
+          this.ctx?.emit({
+            agent: "claude-code",
+            session,
+            status: state.status,
+            ts: Date.now(),
+            threadId,
+            threadName: state.threadName,
+          });
+        }
+      }
       this.scanning = false;
     }
   }

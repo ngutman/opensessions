@@ -18,8 +18,8 @@ describe("OpenCode determineStatus", () => {
     expect(determineStatus({ role: "assistant" }, [{ type: "tool" }])).toBe("running");
   });
 
-  test("returns waiting for assistant with no tools", () => {
-    expect(determineStatus({ role: "assistant" }, [])).toBe("waiting");
+  test("returns done for assistant with no tools", () => {
+    expect(determineStatus({ role: "assistant" }, [])).toBe("done");
   });
 
   test("returns idle for unknown role", () => {

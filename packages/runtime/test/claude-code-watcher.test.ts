@@ -19,10 +19,10 @@ describe("Claude Code determineStatus", () => {
     })).toBe("running");
   });
 
-  test("returns waiting for assistant with text only", () => {
+  test("returns done for assistant with text only", () => {
     expect(determineStatus({
       message: { role: "assistant", content: [{ type: "text", text: "hello" }] },
-    })).toBe("waiting");
+    })).toBe("done");
   });
 
   test("returns running for user message", () => {
@@ -31,10 +31,10 @@ describe("Claude Code determineStatus", () => {
     })).toBe("running");
   });
 
-  test("returns waiting for assistant with string content", () => {
+  test("returns done for assistant with string content", () => {
     expect(determineStatus({
       message: { role: "assistant", content: "thinking..." },
-    })).toBe("waiting");
+    })).toBe("done");
   });
 });
 
@@ -74,16 +74,17 @@ describe("ClaudeCodeAgentWatcher", () => {
     watcher.start(ctx);
     // Wait for seed scan
     await new Promise((r) => setTimeout(r, 200));
-    expect(events.length).toBe(0); // Seed scan doesn't emit
+    const seedCount = events.length; // Seed emits for non-idle sessions
 
-    // Now append — this triggers a real event
-    appendFileSync(filePath, JSON.stringify({ message: { role: "user", content: "fix the bug" } }) + "\n");
+    // Append assistant response — triggers status change (running → done)
+    appendFileSync(filePath, JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "I'll fix it" }] } }) + "\n");
     await new Promise((r) => setTimeout(r, 2500));
 
-    expect(events.length).toBeGreaterThanOrEqual(1);
-    expect(events[0]!.agent).toBe("claude-code");
-    expect(events[0]!.session).toBe("myapp-session");
-    expect(events[0]!.status).toBe("running");
+    const postSeed = events.slice(seedCount);
+    expect(postSeed.length).toBeGreaterThanOrEqual(1);
+    expect(postSeed[0]!.agent).toBe("claude-code");
+    expect(postSeed[0]!.session).toBe("myapp-session");
+    expect(postSeed[0]!.status).toBe("done");
   });
 
   test("skips when session cannot be resolved", async () => {
@@ -112,15 +113,16 @@ describe("ClaudeCodeAgentWatcher", () => {
 
     watcher.start(ctx);
     await new Promise((r) => setTimeout(r, 200));
-    expect(events.length).toBe(0); // Seed
+    const seedCount = events.length; // Seed emits for non-idle sessions
 
-    // Append assistant → triggers waiting
+    // Append assistant → triggers done
     appendFileSync(filePath, JSON.stringify({
       message: { role: "assistant", content: [{ type: "text", text: "done" }] },
     }) + "\n");
     await new Promise((r) => setTimeout(r, 2500));
 
-    const lastEvent = events[events.length - 1]!;
-    expect(lastEvent.status).toBe("waiting");
+    const postSeed = events.slice(seedCount);
+    const lastEvent = postSeed[postSeed.length - 1]!;
+    expect(lastEvent.status).toBe("done");
   });
 });

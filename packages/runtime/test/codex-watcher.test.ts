@@ -73,17 +73,20 @@ describe("CodexAgentWatcher", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test("seed scan does not emit events", async () => {
+  test("seed scan emits events for non-idle sessions", async () => {
     watcher.start(ctx);
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    expect(events).toHaveLength(0);
+    // Seed file has running status → should emit
+    expect(events).toHaveLength(1);
+    expect(events[0]!.agent).toBe("codex");
+    expect(events[0]!.status).toBe("running");
   });
 
   test("emits done when Codex writes a final answer", async () => {
     watcher.start(ctx);
     await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(events).toHaveLength(0);
+    const seedCount = events.length;
 
     appendFileSync(sessionFile,
       JSON.stringify({
@@ -100,11 +103,13 @@ describe("CodexAgentWatcher", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 2500));
 
-    expect(events.length).toBeGreaterThanOrEqual(1);
-    expect(events[0]!.agent).toBe("codex");
-    expect(events[0]!.session).toBe("myapp-session");
-    expect(events[0]!.status).toBe("done");
-    expect(events[0]!.threadId).toBe(threadId);
-    expect(events[0]!.threadName).toBe("Fix auth bug");
+    const postSeed = events.slice(seedCount);
+    expect(postSeed.length).toBeGreaterThanOrEqual(1);
+    const last = postSeed[postSeed.length - 1]!;
+    expect(last.agent).toBe("codex");
+    expect(last.session).toBe("myapp-session");
+    expect(last.status).toBe("done");
+    expect(last.threadId).toBe(threadId);
+    expect(last.threadName).toBe("Fix auth bug");
   });
 });

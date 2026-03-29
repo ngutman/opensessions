@@ -3,7 +3,7 @@ import { appendFileSync } from "fs";
 import { createSignal, createEffect, onCleanup, onMount, batch, For, Show, createMemo, createSelector, type Accessor } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { useKeyboard, useRenderer } from "@opentui/solid";
-import { TextAttributes, type MouseEvent } from "@opentui/core";
+import { TextAttributes, type MouseEvent, type InputRenderable, type KeyEvent } from "@opentui/core";
 
 import { ensureServer } from "@opensessions/runtime";
 import {
@@ -92,7 +92,7 @@ function refocusMainPane() {
         { stdout: "pipe", stderr: "pipe" },
       );
       const lines = r.stdout.toString().trim().split("\n");
-      const main = lines.find((l) => !l.includes("opensessions"));
+      const main = lines.find((l) => !l.includes("opensessions-sidebar"));
       if (main) {
         const paneId = main.split(" ")[0];
         Bun.spawnSync(["tmux", "select-pane", "-t", paneId], { stdout: "pipe", stderr: "pipe" });
@@ -153,9 +153,15 @@ function App() {
   const [isDetailResizing, setIsDetailResizing] = createSignal(false);
   const detailPanelSessionName = createMemo(() => focusedSession() ?? mySession());
 
+  // --- Panel focus: sessions list vs agent detail ---
+  type PanelFocus = "sessions" | "agents";
+  const [panelFocus, setPanelFocus] = createSignal<PanelFocus>("sessions");
+  const [focusedAgentIdx, setFocusedAgentIdx] = createSignal(0);
+
   // --- Modal state ---
   const [modal, setModal] = createSignal<"none" | "theme-picker" | "confirm-kill">("none");
   const [killTarget, setKillTarget] = createSignal<string | null>(null);
+  let themeBeforePreview: Theme | null = null;
 
   const [clientTty, setClientTty] = createSignal(getClientTty());
   let ws: WebSocket | null = null;
@@ -164,13 +170,22 @@ function App() {
   let detailResizeStartHeight = DEFAULT_DETAIL_PANEL_HEIGHT;
   const startupSessionName = getLocalSessionName();
 
+  const focusedData = createMemo(() =>
+    sessions.find((s) => s.name === focusedSession()) ?? null,
+  );
+
   function send(cmd: ClientCommand) {
     if (connected() && ws) ws.send(JSON.stringify(cmd));
   }
 
   function switchToSession(name: string) {
-    send({ type: "mark-seen", name });
-    // Route through server — it has authoritative client TTY from hooks
+    // Optimistic local update — makes rapid Tab repeat instant by removing
+    // the server/hook round-trip from the next-Tab decision.
+    // The server's focus/state broadcast will reconcile if needed.
+    setCurrentSession(name);
+    setFocusedSession(name);
+    setPanelFocus("sessions");
+    setFocusedAgentIdx(0);
     send({ type: "switch-session", name });
   }
 
@@ -200,8 +215,81 @@ function App() {
     send({ type: "focus-session", name: next });
   }
 
+  function moveAgentFocus(delta: -1 | 1) {
+    const data = focusedData();
+    const agents = data?.agents ?? [];
+    if (agents.length === 0) return;
+    const idx = focusedAgentIdx();
+    const next = Math.max(0, Math.min(agents.length - 1, idx + delta));
+    setFocusedAgentIdx(next);
+  }
+
+  function activateFocusedAgent() {
+    const data = focusedData();
+    const agents = data?.agents ?? [];
+    const agent = agents[focusedAgentIdx()];
+    if (!agent || !data) return;
+    appendFileSync("/tmp/opensessions-tui-agent-click.log",
+      `[${new Date().toISOString()}] keyboard focus-agent-pane session=${data.name} agent=${agent.agent} threadId=${agent.threadId} threadName=${agent.threadName}\n`);
+    send({
+      type: "focus-agent-pane",
+      session: data.name,
+      agent: agent.agent,
+      threadId: agent.threadId,
+      threadName: agent.threadName,
+    });
+  }
+
+  function dismissFocusedAgent() {
+    const data = focusedData();
+    const agents = data?.agents ?? [];
+    const agent = agents[focusedAgentIdx()];
+    if (!agent || !data) return;
+    send({
+      type: "dismiss-agent",
+      session: data.name,
+      agent: agent.agent,
+      threadId: agent.threadId,
+    });
+    // Adjust index if we dismissed the last item
+    if (focusedAgentIdx() >= agents.length - 1 && agents.length > 1) {
+      setFocusedAgentIdx(agents.length - 2);
+    }
+    // If no agents left, go back to sessions
+    if (agents.length <= 1) setPanelFocus("sessions");
+  }
+
+  function killFocusedAgentPane() {
+    const data = focusedData();
+    const agents = data?.agents ?? [];
+    const agent = agents[focusedAgentIdx()];
+    if (!agent || !data) return;
+    send({
+      type: "kill-agent-pane",
+      session: data.name,
+      agent: agent.agent,
+      threadId: agent.threadId,
+      threadName: agent.threadName,
+    });
+  }
+
+  function togglePanelFocus() {
+    const data = focusedData();
+    const agents = data?.agents ?? [];
+    if (panelFocus() === "sessions" && agents.length > 0) {
+      setPanelFocus("agents");
+      setFocusedAgentIdx((idx) => Math.min(idx, agents.length - 1));
+    } else {
+      setPanelFocus("sessions");
+    }
+  }
+
   function applyTheme(themeName: string) {
     send({ type: "set-theme", theme: themeName });
+  }
+
+  function previewTheme(themeName: string) {
+    setTheme(resolveTheme(themeName));
   }
 
   function resizeDetailPanel(delta: -1 | 1) {
@@ -431,12 +519,8 @@ function App() {
   useKeyboard((key) => {
     const currentModal = modal();
 
-    // --- Theme picker modal handles its own keys ---
+    // --- Theme picker modal: input handles all keys via onKeyDown ---
     if (currentModal === "theme-picker") {
-      if (key.name === "escape" || key.name === "q") {
-        setModal("none");
-      }
-      // Select component handles j/k/up/down/enter internally
       return;
     }
 
@@ -467,31 +551,60 @@ function App() {
 
     switch (key.name) {
       case "q":
-        // Send quit to server — it will kill all sidebars and shut down
         send({ type: "quit" });
         break;
       case "escape":
-        // Escape just closes this TUI locally (doesn't quit server)
-        if (ws) ws.close();
-        renderer.destroy();
+        if (panelFocus() === "agents") {
+          setPanelFocus("sessions");
+        } else {
+          if (ws) ws.close();
+          renderer.destroy();
+        }
         break;
       case "up":
       case "k":
-        moveLocalFocus(-1);
+        if (panelFocus() === "agents") {
+          moveAgentFocus(-1);
+        } else {
+          moveLocalFocus(-1);
+        }
         break;
       case "down":
       case "j":
-        moveLocalFocus(1);
+        if (panelFocus() === "agents") {
+          moveAgentFocus(1);
+        } else {
+          moveLocalFocus(1);
+        }
         break;
       case "left":
-        resizeDetailPanel(-1);
+      case "h":
+        if (panelFocus() === "agents") {
+          setPanelFocus("sessions");
+        } else {
+          resizeDetailPanel(-1);
+        }
         break;
       case "right":
-        resizeDetailPanel(1);
+      case "l":
+        if (panelFocus() === "sessions") {
+          const data = focusedData();
+          const agents = data?.agents ?? [];
+          if (agents.length > 0) {
+            setPanelFocus("agents");
+            setFocusedAgentIdx((idx) => Math.min(idx, agents.length - 1));
+          } else {
+            resizeDetailPanel(1);
+          }
+        }
         break;
       case "return": {
-        const focused = focusedSession();
-        if (focused) switchToSession(focused);
+        if (panelFocus() === "agents") {
+          activateFocusedAgent();
+        } else {
+          const focused = focusedSession();
+          if (focused) switchToSession(focused);
+        }
         break;
       }
       case "tab": {
@@ -507,21 +620,30 @@ function App() {
         send({ type: "refresh" });
         break;
       case "t":
+        themeBeforePreview = theme();
         setModal("theme-picker");
         break;
       case "u":
         send({ type: "show-all-sessions" });
         break;
       case "d": {
-        const focused = focusedSession();
-        if (focused) send({ type: "hide-session", name: focused });
+        if (panelFocus() === "agents") {
+          dismissFocusedAgent();
+        } else {
+          const focused = focusedSession();
+          if (focused) send({ type: "hide-session", name: focused });
+        }
         break;
       }
       case "x": {
-        const focused = focusedSession();
-        if (focused) {
-          setKillTarget(focused);
-          setModal("confirm-kill");
+        if (panelFocus() === "agents") {
+          killFocusedAgentPane();
+        } else {
+          const focused = focusedSession();
+          if (focused) {
+            setKillTarget(focused);
+            setModal("confirm-kill");
+          }
         }
         break;
       }
@@ -554,10 +676,6 @@ function App() {
 
   const isFocused = createSelector(focusedSession);
 
-  const focusedData = createMemo(() =>
-    sessions.find((s) => s.name === focusedSession()) ?? null,
-  );
-
   return (
     <box flexDirection="column" flexGrow={1} backgroundColor={P().crust}>
       {/* Header */}
@@ -568,7 +686,7 @@ function App() {
           <span style={{ fg: P().overlay0 }}>{" "}{String(sessions.length)}</span>
           {runningCount() > 0 ? <span style={{ fg: P().yellow }}>{" "}{"⚡"}{runningCount()}</span> : ""}
           {errorCount() > 0 ? <span style={{ fg: P().red }}>{" "}{"✗"}{errorCount()}</span> : ""}
-          {unseenCount() > 0 ? <span style={{ fg: P().teal }}>{" "}{"●"}{unseenCount()}</span> : ""}
+          {unseenCount() > 0 ? <span style={{ fg: P().teal }}>{" "}{"●"}{" "}{unseenCount()}</span> : ""}
         </text>
       </box>
 
@@ -603,12 +721,24 @@ function App() {
               theme={theme}
               statusColors={S}
               spinIdx={spinIdx}
+              focusedAgentIdx={panelFocus() === "agents" ? focusedAgentIdx() : -1}
               onDismissAgent={(agent) => {
                 send({
                   type: "dismiss-agent",
                   session: data().name,
                   agent: agent.agent,
                   threadId: agent.threadId,
+                });
+              }}
+              onFocusAgentPane={(agent) => {
+                appendFileSync("/tmp/opensessions-tui-agent-click.log",
+                  `[${new Date().toISOString()}] sending focus-agent-pane session=${data().name} agent=${agent.agent} threadId=${agent.threadId} threadName=${agent.threadName}\n`);
+                send({
+                  type: "focus-agent-pane",
+                  session: data().name,
+                  agent: agent.agent,
+                  threadId: agent.threadId,
+                  threadName: agent.threadName,
                 });
               }}
               isResizeHover={isDetailResizeHover()}
@@ -625,20 +755,31 @@ function App() {
       {/* Footer */}
       <box flexDirection="column" paddingLeft={1} paddingBottom={1} paddingTop={0} flexShrink={0}>
         <text style={{ fg: P().surface2 }}>{"─".repeat(26)}</text>
-        <text>
-          <span style={{ fg: P().overlay0 }}>{"  ⇥"}</span>
-          <span style={{ fg: P().overlay1 }}>{" cycle  "}</span>
-          <span style={{ fg: P().overlay0 }}>{"⏎"}</span>
-          <span style={{ fg: P().overlay1 }}>{" go  "}</span>
-          <span style={{ fg: P().overlay0 }}>{"d"}</span>
-          <span style={{ fg: P().overlay1 }}>{" remove  "}</span>
-          <span style={{ fg: P().overlay0 }}>{"u"}</span>
-          <span style={{ fg: P().overlay1 }}>{" restore  "}</span>
-          <span style={{ fg: P().overlay0 }}>{"x"}</span>
-          <span style={{ fg: P().overlay1 }}>{" kill  "}</span>
-          <span style={{ fg: P().overlay0 }}>{"t"}</span>
-          <span style={{ fg: P().overlay1 }}>{" theme"}</span>
-        </text>
+        <Show when={panelFocus() === "sessions"} fallback={
+          <text>
+            <span style={{ fg: P().overlay0 }}>{"←"}</span>
+            <span style={{ fg: P().overlay1 }}>{" back  "}</span>
+            <span style={{ fg: P().overlay0 }}>{"⏎"}</span>
+            <span style={{ fg: P().overlay1 }}>{" focus  "}</span>
+            <span style={{ fg: P().overlay0 }}>{"d"}</span>
+            <span style={{ fg: P().overlay1 }}>{" dismiss  "}</span>
+            <span style={{ fg: P().overlay0 }}>{"x"}</span>
+            <span style={{ fg: P().overlay1 }}>{" kill"}</span>
+          </text>
+        }>
+          <text>
+            <span style={{ fg: P().overlay0 }}>{"⇥"}</span>
+            <span style={{ fg: P().overlay1 }}>{" cycle  "}</span>
+            <span style={{ fg: P().overlay0 }}>{"⏎"}</span>
+            <span style={{ fg: P().overlay1 }}>{" go  "}</span>
+            <span style={{ fg: P().overlay0 }}>{"→"}</span>
+            <span style={{ fg: P().overlay1 }}>{" agents  "}</span>
+            <span style={{ fg: P().overlay0 }}>{"d"}</span>
+            <span style={{ fg: P().overlay1 }}>{" hide  "}</span>
+            <span style={{ fg: P().overlay0 }}>{"x"}</span>
+            <span style={{ fg: P().overlay1 }}>{" kill"}</span>
+          </text>
+        </Show>
       </box>
 
       {/* Theme picker overlay */}
@@ -646,10 +787,20 @@ function App() {
         <ThemePicker
           palette={P}
           onSelect={(name) => {
+            themeBeforePreview = null;
             applyTheme(name);
             setModal("none");
           }}
-          onClose={() => setModal("none")}
+          onPreview={(name) => {
+            previewTheme(name);
+          }}
+          onClose={() => {
+            if (themeBeforePreview) {
+              setTheme(themeBeforePreview);
+              themeBeforePreview = null;
+            }
+            setModal("none");
+          }}
         />
       </Show>
 
@@ -695,14 +846,71 @@ function App() {
 interface ThemePickerProps {
   palette: Accessor<Theme["palette"]>;
   onSelect: (name: string) => void;
+  onPreview: (name: string) => void;
   onClose: () => void;
 }
 
 function ThemePicker(props: ThemePickerProps) {
-  const options = THEME_NAMES.map((name) => ({
-    name,
-    value: name,
-  }));
+  let inputRef: InputRenderable;
+
+  const [query, setQuery] = createSignal("");
+  const [selected, setSelected] = createSignal(0);
+
+  const filtered = createMemo(() => {
+    const q = query().toLowerCase();
+    if (!q) return THEME_NAMES;
+    return THEME_NAMES.filter((name) => name.toLowerCase().includes(q));
+  });
+
+  function move(direction: -1 | 1) {
+    const list = filtered();
+    if (!list.length) return;
+    let next = selected() + direction;
+    if (next < 0) next = list.length - 1;
+    if (next >= list.length) next = 0;
+    setSelected(next);
+    const name = list[next];
+    if (name) props.onPreview(name);
+  }
+
+  function confirm() {
+    const name = filtered()[selected()];
+    if (name) props.onSelect(name);
+  }
+
+  function handleKeyDown(e: KeyEvent) {
+    if (e.name === "up") {
+      e.preventDefault();
+      move(-1);
+    } else if (e.name === "down") {
+      e.preventDefault();
+      move(1);
+    } else if (e.name === "return") {
+      e.preventDefault();
+      confirm();
+    } else if (e.name === "escape") {
+      e.preventDefault();
+      props.onClose();
+    }
+  }
+
+  function handleInput(value: string) {
+    setQuery(value);
+    setSelected(0);
+  }
+
+  const MAX_VISIBLE = 12;
+
+  const scrollOffset = createMemo(() => {
+    const sel = selected();
+    if (sel < MAX_VISIBLE) return 0;
+    return sel - MAX_VISIBLE + 1;
+  });
+
+  const visibleItems = createMemo(() => {
+    const list = filtered();
+    return list.slice(scrollOffset(), scrollOffset() + MAX_VISIBLE);
+  });
 
   return (
     <box
@@ -725,17 +933,50 @@ function ThemePicker(props: ThemePickerProps) {
           <span style={{ fg: props.palette().blue, attributes: BOLD }}>Select Theme</span>
         </text>
         <text style={{ fg: props.palette().surface2 }}>{"─".repeat(26)}</text>
-        <select
-          options={options}
-          onSelect={(_index, option) => {
-            props.onSelect(option.value as string);
-          }}
-          focused
-          height={14}
-          selectedBackgroundColor={props.palette().surface0}
-          selectedTextColor={props.palette().text}
-        />
+        <box border borderColor={props.palette().surface1} marginBottom={1}>
+          <input
+            ref={(r: InputRenderable) => { inputRef = r; inputRef.focus(); }}
+            value={query()}
+            onInput={handleInput}
+            onKeyDown={handleKeyDown}
+            placeholder="Search themes…"
+            backgroundColor={props.palette().surface0}
+            focusedBackgroundColor={props.palette().surface0}
+            textColor={props.palette().text}
+            cursorColor={props.palette().blue}
+            placeholderColor={props.palette().overlay0}
+          />
+        </box>
+        <Show when={filtered().length > 0} fallback={
+          <box paddingLeft={1}><text style={{ fg: props.palette().overlay0 }}>No matches</text></box>
+        }>
+          <For each={visibleItems()}>
+            {(name) => {
+              const idx = createMemo(() => filtered().indexOf(name));
+              const isSel = createMemo(() => idx() === selected());
+              return (
+                <box
+                  paddingLeft={1}
+                  paddingRight={1}
+                  backgroundColor={isSel() ? props.palette().surface0 : undefined}
+                >
+                  <text style={{ fg: isSel() ? props.palette().text : props.palette().subtext0 }}>
+                    {isSel() ? "▸ " : "  "}{name}
+                  </text>
+                </box>
+              );
+            }}
+          </For>
+          <Show when={filtered().length > MAX_VISIBLE}>
+            <text style={{ fg: props.palette().overlay0, attributes: DIM }}>
+              {"  "}↕ {filtered().length - MAX_VISIBLE} more
+            </text>
+          </Show>
+        </Show>
+        <text style={{ fg: props.palette().surface2 }}>{"─".repeat(26)}</text>
         <text style={{ fg: props.palette().overlay0 }}>
+          <span style={{ attributes: DIM }}>↑↓</span>{" browse  "}
+          <span style={{ attributes: DIM }}>⏎</span>{" select  "}
           <span style={{ attributes: DIM }}>esc</span>{" close"}
         </text>
       </box>
@@ -772,7 +1013,9 @@ interface DetailPanelProps {
   theme: Accessor<Theme>;
   statusColors: Accessor<Theme["status"]>;
   spinIdx: Accessor<number>;
+  focusedAgentIdx: number;
   onDismissAgent: (agent: SessionData["agents"][number]) => void;
+  onFocusAgentPane: (agent: SessionData["agents"][number]) => void;
   isResizeHover: boolean;
   isResizing: boolean;
   onResizeStart: (event: MouseEvent) => void;
@@ -884,13 +1127,15 @@ function DetailPanel(props: DetailPanelProps) {
       {/* Agent instances */}
       <Show when={hasAgents()}>
         <For each={agents()}>
-          {(agent) => (
+          {(agent, i) => (
             <AgentListItem
               agent={agent}
               palette={P}
               statusColors={props.statusColors}
               spinIdx={props.spinIdx}
+              isKeyboardFocused={i() === props.focusedAgentIdx}
               onDismiss={() => props.onDismissAgent(agent)}
+              onFocusPane={() => props.onFocusAgentPane(agent)}
             />
           )}
         </For>
@@ -904,13 +1149,16 @@ interface AgentListItemProps {
   palette: Accessor<Theme["palette"]>;
   statusColors: Accessor<Theme["status"]>;
   spinIdx: Accessor<number>;
+  isKeyboardFocused: boolean;
   onDismiss: () => void;
+  onFocusPane: () => void;
 }
 
 function AgentListItem(props: AgentListItemProps) {
   const P = () => props.palette();
   const SC = () => props.statusColors();
   const [isDismissHover, setIsDismissHover] = createSignal(false);
+  const [isFlash, setIsFlash] = createSignal(false);
 
   const isTerminal = () => ["done", "error", "interrupted"].includes(props.agent.status);
   const isUnseen = () => isTerminal() && props.agent.unseen === true;
@@ -941,37 +1189,67 @@ function AgentListItem(props: AgentListItemProps) {
     return "";
   };
 
+  const triggerFlash = () => {
+    setIsFlash(true);
+    setTimeout(() => setIsFlash(false), 150);
+  };
+
+  const bgColor = () => {
+    if (isFlash()) return P().surface1;
+    if (props.isKeyboardFocused) return P().surface0;
+    return "transparent";
+  };
+
   return (
-    <box flexDirection="column" flexShrink={0}>
+    <box flexDirection="column" flexShrink={0} onMouseDown={(event) => {
+      // Don't trigger focus if clicking the dismiss button
+      if ((event.target as any)?.id === "dismiss") return;
+      appendFileSync("/tmp/opensessions-tui-agent-click.log",
+        `[${new Date().toISOString()}] clicked agent=${props.agent.agent} thread=${props.agent.threadName ?? "?"}\n`);
+      triggerFlash();
+      props.onFocusPane();
+    }}>
       <box height={1} />
-      <box flexDirection="row" paddingRight={1}>
-        <text flexGrow={1} truncate>
-          <span style={{ fg: color() }}>{icon()}</span>
-          <span style={{ fg: P().subtext1 }}>{" "}{props.agent.agent}</span>
-        </text>
-        <Show when={!isTerminal() || !isUnseen()}>
-          <text flexShrink={0}>
-            <span style={{ fg: color(), attributes: DIM }}>{statusText()}</span>
-          </text>
-        </Show>
-        <text
-          flexShrink={0}
-          onMouseDown={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            props.onDismiss();
-          }}
-          onMouseOver={() => setIsDismissHover(true)}
-          onMouseOut={() => setIsDismissHover(false)}
-        >
-          <span style={{ fg: isDismissHover() ? P().red : P().overlay0 }}>{" ✕"}</span>
-        </text>
+      <box
+        flexDirection="row"
+        backgroundColor={bgColor()}
+        paddingLeft={1}
+      >
+        {/* Content column — name row + thread name row */}
+        <box flexDirection="column" flexGrow={1} paddingRight={1}>
+          {/* Row 1: icon + agent name + status + dismiss */}
+          <box flexDirection="row">
+            <text flexGrow={1} truncate>
+              <span style={{ fg: color() }}>{icon()}</span>
+              <span style={{ fg: props.isKeyboardFocused ? P().text : P().subtext1, attributes: props.isKeyboardFocused ? BOLD : undefined }}>{" "}{props.agent.agent}</span>
+            </text>
+            <Show when={!isTerminal() || !isUnseen()}>
+              <text flexShrink={0}>
+                <span style={{ fg: color(), attributes: DIM }}>{statusText()}</span>
+              </text>
+            </Show>
+            <text
+              flexShrink={0}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                props.onDismiss();
+              }}
+              onMouseOver={() => setIsDismissHover(true)}
+              onMouseOut={() => setIsDismissHover(false)}
+            >
+              <span style={{ fg: isDismissHover() ? P().red : P().overlay0 }}>{" ✕"}</span>
+            </text>
+          </box>
+
+          {/* Row 2: thread name */}
+          <Show when={props.agent.threadName}>
+            <text truncate>
+              <span style={{ fg: isUnseen() ? color() : P().overlay0 }}>{props.agent.threadName}</span>
+            </text>
+          </Show>
+        </box>
       </box>
-      <Show when={props.agent.threadName}>
-        <text paddingLeft={2} paddingRight={1}>
-          <span style={{ fg: isUnseen() ? color() : P().overlay0 }}>{props.agent.threadName}</span>
-        </text>
-      </Show>
     </box>
   );
 }
@@ -1060,7 +1338,7 @@ function SessionCard(props: SessionCardProps) {
   };
 
   const bgColor = () => {
-    if (props.isFocused) return P().surface0;
+    if (props.isFocused) return P().surface1;
     return "transparent";
   };
 

@@ -75,8 +75,6 @@ Clicking a detected port opens `http://localhost:<port>`.
 
 | Key | Action |
 | --- | --- |
-| `prefix s` | Toggle the sidebar |
-| `prefix S` | Reveal and focus the sidebar pane |
 | `prefix o s` by default | Reveal and focus the sidebar pane through the opensessions command table |
 | `prefix o t` by default | Toggle the sidebar through the opensessions command table |
 | `prefix o 1` through `prefix o 9` by default | Switch directly to the visible session indices |

@@ -13,7 +13,7 @@ const STATUS_PRIORITY: Record<string, number> = {
   idle: 0,
 };
 
-function instanceKey(agent: string, threadId?: string): string {
+export function instanceKey(agent: string, threadId?: string): string {
   return threadId ? `${agent}:${threadId}` : agent;
 }
 
@@ -24,12 +24,14 @@ export class AgentTracker {
   // Per-instance unseen tracking: "session\0instanceKey"
   private unseenInstances = new Set<string>();
   private active = new Set<string>();
+  // Pinned instances: agents backed by a live pane process — exempt from pruning
+  private pinnedKeys = new Map<string, Set<string>>(); // session → Set<instanceKey>
 
   private unseenKey(session: string, key: string): string {
     return `${session}\0${key}`;
   }
 
-  applyEvent(event: AgentEvent): void {
+  applyEvent(event: AgentEvent, options?: { seed?: boolean }): void {
     const key = instanceKey(event.agent, event.threadId);
 
     // Store instance
@@ -52,9 +54,10 @@ export class AgentTracker {
     }
 
     // Per-instance unseen tracking
+    // Seeded events always mark as unseen (they represent state from before the user connected)
     const ukey = this.unseenKey(event.session, key);
     if (TERMINAL_STATUSES.has(event.status)) {
-      if (!this.active.has(event.session)) {
+      if (options?.seed || !this.active.has(event.session)) {
         this.unseenInstances.add(ukey);
       }
     } else {
@@ -133,6 +136,7 @@ export class AgentTracker {
     for (const [session, sessionInstances] of this.instances) {
       for (const [key, event] of sessionInstances) {
         if (event.status === "running" && now - event.ts > timeoutMs) {
+          if (this.isPinned(session, key)) continue;
           sessionInstances.delete(key);
           this.unseenInstances.delete(this.unseenKey(session, key));
         }
@@ -143,7 +147,7 @@ export class AgentTracker {
     }
   }
 
-  /** Auto-prune terminal instances older than timeout, but only if instance is not unseen */
+  /** Auto-prune terminal instances older than timeout, but only if instance is not unseen or pinned */
   pruneTerminal(): void {
     const now = Date.now();
     for (const [session, sessionInstances] of this.instances) {
@@ -151,6 +155,7 @@ export class AgentTracker {
         if (!TERMINAL_STATUSES.has(event.status)) continue;
         const ukey = this.unseenKey(session, key);
         if (this.unseenInstances.has(ukey)) continue; // Don't prune unseen — user hasn't looked yet
+        if (this.isPinned(session, key)) continue; // Don't prune agents backed by live panes
         if (now - event.ts > TERMINAL_PRUNE_MS) {
           sessionInstances.delete(key);
         }
@@ -201,5 +206,28 @@ export class AgentTracker {
   setActiveSessions(sessions: string[]): void {
     this.active.clear();
     for (const s of sessions) this.active.add(s);
+  }
+
+  /** Update the set of pinned instance keys for a session (live pane-backed agents). */
+  setPinnedInstances(session: string | null, keys: string[]): void {
+    this.pinnedKeys.clear();
+    if (session && keys.length > 0) {
+      this.pinnedKeys.set(session, new Set(keys));
+    }
+  }
+
+  /** Update pinned instance keys for multiple sessions at once. */
+  setPinnedInstancesMulti(keysBySession: Map<string, string[]>): void {
+    this.pinnedKeys.clear();
+    for (const [session, keys] of keysBySession) {
+      if (keys.length > 0) {
+        this.pinnedKeys.set(session, new Set(keys));
+      }
+    }
+  }
+
+  /** Check if an instance is pinned (backed by a live pane process). */
+  isPinned(session: string, key: string): boolean {
+    return this.pinnedKeys.get(session)?.has(key) ?? false;
   }
 }

@@ -347,6 +347,10 @@ export class TmuxClient {
     this.run(["select-pane", "-t", target]);
   }
 
+  setPaneStyle(target: string, style: string): void {
+    this.run(["select-pane", "-t", target, "-P", style]);
+  }
+
   setPaneTitle(target: string, title: string): void {
     this.run(["select-pane", "-t", target, "-T", title]);
   }
@@ -444,7 +448,7 @@ export class TmuxClient {
     const dirs = new Map<string, string>();
     const { stdout } = this.run([
       "list-panes", "-a",
-      "-f", "#{&&:#{window_active},#{!=:#{pane_title},opensessions}}",
+      "-f", "#{&&:#{window_active},#{!=:#{pane_title},opensessions-sidebar}}",
       "-F", `#{session_name}${SEP}#{pane_current_path}`,
     ]);
     if (!stdout) return dirs;

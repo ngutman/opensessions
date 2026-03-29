@@ -82,8 +82,6 @@ The tmux integration reads these tmux options instead of `config.json`:
 
 | tmux option | Default | Used by |
 | --- | --- | --- |
-| `@opensessions-key` | `s` | tmux keybinding in `opensessions.tmux` |
-| `@opensessions-focus-key` | `S` | Prefix keybinding that reveals and focuses the sidebar pane |
 | `@opensessions-prefix-key` | `o` | Prefix key that opens the `opensessions` command table for the next keypress |
 | `@opensessions-prefix-focus-key` | `s` | Command-table key that reveals and focuses the sidebar pane |
 | `@opensessions-prefix-toggle-key` | `t` | Command-table key that toggles the sidebar |
@@ -124,8 +122,6 @@ All other tmux options fall back to the defaults shown in the table above.
 
 Recommended mapping:
 
-- Keep `@opensessions-key` on `s` for the familiar toggle.
-- Use `@opensessions-focus-key` on `S` so `prefix S` jumps straight into the sidebar.
 - Keep `@opensessions-prefix-key` on `o` so `prefix o` becomes an opensessions mini-leader.
 - Keep `@opensessions-prefix-focus-key` on `s` and `@opensessions-prefix-toggle-key` on `t` so the defaults read as `prefix o s` and `prefix o t`.
 - Keep `@opensessions-prefix-index-keys` on `1` through `9` so `prefix o 1` through `prefix o 9` jump to the same visible indices shown in the sidebar.

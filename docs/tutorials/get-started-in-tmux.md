@@ -80,8 +80,6 @@ Result: the new keybinding is active in your current tmux server.
 
 Recommended shortcut scheme:
 
-- `prefix s` toggles the sidebar.
-- `prefix S` reveals and focuses the sidebar pane.
 - `prefix o s` reveals and focuses the sidebar pane.
 - `prefix o t` toggles the sidebar.
 - `prefix o 1` through `prefix o 9` switch directly to the visible session indices.
@@ -93,10 +91,10 @@ If you use a terminal or window manager setup where no-prefix bindings are safe,
 Inside tmux, press:
 
 ```text
-prefix s
+prefix o s
 ```
 
-Result: tmux asks the opensessions server to toggle the sidebar. If the server is not running yet, the helper script starts it first.
+Result: tmux enters the opensessions command table and then reveals and focuses the sidebar. If the server is not running yet, the helper script starts it first.
 
 ## 6. Verify the sidebar is live
 

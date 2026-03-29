@@ -1,10 +1,11 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync, appendFileSync, watch, type FSWatcher } from "fs";
 import { join } from "path";
+import { homedir } from "os";
 import type { MuxProvider } from "../contracts/mux";
 import { isFullSidebarCapable, isBatchCapable } from "../contracts/mux";
 import type { AgentEvent } from "../contracts/agent";
 import type { AgentWatcher, AgentWatcherContext } from "../contracts/agent-watcher";
-import { AgentTracker } from "../agents/tracker";
+import { AgentTracker, instanceKey } from "../agents/tracker";
 import { SessionOrder } from "./session-order";
 import { loadConfig, saveConfig } from "../config";
 import {
@@ -296,10 +297,22 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       return null;
     },
     emit(event: AgentEvent) {
-      tracker.applyEvent(event);
+      tracker.applyEvent(event, { seed: !watchersSeeded });
       debouncedBroadcast();
     },
   };
+
+  // Flag to track when initial watcher seeding is complete
+  let watchersSeeded = false;
+  setTimeout(() => {
+    watchersSeeded = true;
+    // Re-apply focus for the current session to clear seed-unseen flags
+    // (handleFocus already ran before seed events arrived)
+    const current = getCurrentSession();
+    if (current && tracker.handleFocus(current)) {
+      broadcastState();
+    }
+  }, 3000);
 
   let focusedSession: string | null = null;
   let lastState: ServerState | null = null;
@@ -322,6 +335,43 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     }
     log("getCurrentSession", "no provider returned a session");
     return null;
+  }
+
+  /** Merge pane-detected agents into watcher-provided agents for a session.
+   *  Watcher events take precedence — pane presence only adds synthetic entries
+   *  for agents that aren't already tracked by watchers. */
+  function mergeAgentsWithPanePresence(sessionName: string, watcherAgents: AgentEvent[]): AgentEvent[] {
+    const paneAgents = paneAgentsBySession.get(sessionName);
+    if (!paneAgents || paneAgents.size === 0) return watcherAgents;
+
+    const result = [...watcherAgents];
+    // Build a set of tracked agent:threadId keys for matching
+    const trackedByKey = new Set(watcherAgents.map((a) => instanceKey(a.agent, a.threadId)));
+    // Also track which agent names + threadIds are covered by watchers
+    const trackedThreadIds = new Set(
+      watcherAgents.filter((a) => a.threadId).map((a) => `${a.agent}:${a.threadId}`),
+    );
+
+    for (const [_key, presence] of paneAgents) {
+      // If the pane scanner resolved a threadId, check if watcher already tracks it
+      if (presence.threadId && trackedThreadIds.has(`${presence.agent}:${presence.threadId}`)) continue;
+      // Check by instanceKey as well
+      if (trackedByKey.has(instanceKey(presence.agent, presence.threadId))) continue;
+      // If we have no threadId from pane scan and watcher tracks any instance of this agent, skip
+      if (!presence.threadId && watcherAgents.some((a) => a.agent === presence.agent)) continue;
+
+      result.push({
+        agent: presence.agent,
+        session: sessionName,
+        status: presence.status ?? "idle",
+        ts: presence.lastSeenTs,
+        threadId: presence.threadId,
+        threadName: presence.threadName,
+        paneId: presence.paneId,
+      });
+    }
+
+    return result;
   }
 
   function computeState(): ServerState {
@@ -388,7 +438,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         windows,
         uptime,
         agentState: tracker.getState(name),
-        agents: tracker.getAgents(name),
+        agents: mergeAgentsWithPanePresence(name, tracker.getAgents(name)),
         eventTimestamps: tracker.getEventTimestamps(name),
       };
     });
@@ -402,7 +452,19 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     return { type: "state", sessions, focusedSession, currentSession, theme: currentTheme, sidebarWidth, ts: Date.now() };
   }
 
+  let broadcastPending = false;
+
   function broadcastState() {
+    if (broadcastPending) return;
+    broadcastPending = true;
+    queueMicrotask(() => {
+      broadcastPending = false;
+      broadcastStateImmediate();
+    });
+  }
+
+  function broadcastStateImmediate() {
+    invalidateCurrentSessionCache();
     tracker.pruneStuck(STUCK_RUNNING_TIMEOUT_MS);
     tracker.pruneTerminal();
     lastState = computeState();
@@ -411,9 +473,26 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     server.publish("sidebar", msg);
   }
 
+  // Lightweight current-session cache — avoids a tmux subprocess per focus update
+  let cachedCurrentSession: string | null = null;
+  let cachedCurrentSessionTs = 0;
+  const CURRENT_SESSION_CACHE_TTL = 500; // ms — short TTL, just enough to coalesce rapid switches
+
+  function getCachedCurrentSession(): string | null {
+    const now = Date.now();
+    if (now - cachedCurrentSessionTs < CURRENT_SESSION_CACHE_TTL) return cachedCurrentSession;
+    cachedCurrentSession = getCurrentSession();
+    cachedCurrentSessionTs = now;
+    return cachedCurrentSession;
+  }
+
+  function invalidateCurrentSessionCache(): void {
+    cachedCurrentSessionTs = 0;
+  }
+
   function broadcastFocusOnly(sender?: any) {
     if (!lastState) return;
-    const currentSession = getCurrentSession();
+    const currentSession = getCachedCurrentSession();
     lastState = { ...lastState, focusedSession, currentSession };
     const msg: FocusUpdate = { type: "focus", focusedSession, currentSession };
     const payload = JSON.stringify(msg);
@@ -442,8 +521,24 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
 
   function handleFocus(name: string): void {
     focusedSession = name;
+    invalidateCurrentSessionCache();
+    // Rescan pane agents when session focus changes
+    refreshPaneAgents();
     const hadUnseen = tracker.handleFocus(name);
-    if (hadUnseen) {
+    if (hadUnseen && lastState) {
+      // Patch unseen flags in-place — avoids a full computeState with many subprocesses
+      const currentSession = getCachedCurrentSession();
+      const updatedSessions = lastState.sessions.map((s) => {
+        if (s.name !== name) return s;
+        return {
+          ...s,
+          unseen: false,
+          agents: s.agents.map((a) => ({ ...a, unseen: false })),
+        };
+      });
+      lastState = { ...lastState, sessions: updatedSessions, focusedSession, currentSession };
+      server.publish("sidebar", JSON.stringify(lastState));
+    } else if (hadUnseen) {
       broadcastState();
     } else {
       broadcastFocusOnly();
@@ -523,11 +618,29 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     };
   }
 
-  function listSidebarPanesByProvider() {
+  // Short-lived cache for sidebar pane listings — avoid repeated tmux list-panes -a
+  let sidebarPaneCache: ReturnType<typeof listSidebarPanesByProviderUncached> | null = null;
+  let sidebarPaneCacheTs = 0;
+  const SIDEBAR_PANE_CACHE_TTL = 300; // ms
+
+  function listSidebarPanesByProviderUncached() {
     return getProvidersWithSidebar().map((provider) => ({
       provider,
       panes: provider.listSidebarPanes(),
     }));
+  }
+
+  function listSidebarPanesByProvider() {
+    const now = Date.now();
+    if (sidebarPaneCache && now - sidebarPaneCacheTs < SIDEBAR_PANE_CACHE_TTL) return sidebarPaneCache;
+    sidebarPaneCache = listSidebarPanesByProviderUncached();
+    sidebarPaneCacheTs = now;
+    return sidebarPaneCache;
+  }
+
+  function invalidateSidebarPaneCache(): void {
+    sidebarPaneCache = null;
+    sidebarPaneCacheTs = 0;
   }
 
   const pendingSidebarSpawns = new Set<string>();
@@ -556,6 +669,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       return;
     }
 
+    invalidateSidebarPaneCache();
     if (sidebarVisible) {
       for (const p of providers) {
         const panes = p.listSidebarPanes();
@@ -613,7 +727,10 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       return;
     }
 
-    const existingPanes = p.listSidebarPanes();
+    // Use cached pane listing to avoid redundant tmux list-panes -a calls
+    const allPanesByProvider = listSidebarPanesByProvider();
+    const providerEntry = allPanesByProvider.find((e) => e.provider === p);
+    const existingPanes = providerEntry?.panes ?? [];
     const hasInWindow = existingPanes.some((ep) => ep.windowId === windowId);
     log("ensure", "checking window", {
       curSession, windowId, existingPanes: existingPanes.length,
@@ -621,17 +738,57 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     });
 
     if (!hasInWindow) {
+      invalidateSidebarPaneCache();
       pendingSidebarSpawns.add(spawnKey);
       log("ensure", "SPAWNING sidebar", { curSession, windowId, sidebarWidth, sidebarPosition, scriptsDir });
       try {
         const newPaneId = p.spawnSidebar(curSession, windowId, sidebarWidth, sidebarPosition, scriptsDir);
         log("ensure", "spawn result", { newPaneId });
+        // After spawning/restoring sidebar, focus may land on the sidebar or edge pane.
+        // Re-select the first non-sidebar pane so the user's main pane stays focused.
+        if (newPaneId) {
+          const raw = shell([
+            "tmux", "list-panes", "-t", windowId,
+            "-F", "#{pane_id}|#{pane_title}|#{pane_active}",
+          ]);
+          const activePanes = raw.split("\n").filter(Boolean).map((l) => {
+            const [id, ...rest] = l.split("|");
+            const active = rest.pop();
+            const title = rest.join("|");
+            return { id, title, active: active === "1" };
+          });
+          const activeNonSidebar = activePanes.find((ap) => ap.active && ap.title !== "opensessions-sidebar");
+          if (!activeNonSidebar) {
+            const firstNonSidebar = activePanes.find((ap) => ap.title !== "opensessions-sidebar");
+            if (firstNonSidebar) {
+              log("ensure", "refocusing non-sidebar pane after spawn", { paneId: firstNonSidebar.id });
+              shell(["tmux", "select-pane", "-t", firstNonSidebar.id]);
+            }
+          }
+        }
       } finally {
         pendingSidebarSpawns.delete(spawnKey);
       }
+      // Only schedule resize when we actually spawned — layout changed
+      scheduleSidebarResize();
     }
+    // When sidebar already exists, no layout change — skip resize
+  }
 
-    scheduleSidebarResize();
+  // Debounced ensure-sidebar — collapses rapid hook-fired calls during fast
+  // session switching into a single check after switching settles.
+  let ensureSidebarTimer: ReturnType<typeof setTimeout> | null = null;
+  let ensureSidebarPendingCtx: { session: string; windowId: string } | undefined;
+
+  function debouncedEnsureSidebar(ctx?: { session: string; windowId: string }): void {
+    if (ctx) ensureSidebarPendingCtx = ctx;
+    if (ensureSidebarTimer) clearTimeout(ensureSidebarTimer);
+    ensureSidebarTimer = setTimeout(() => {
+      ensureSidebarTimer = null;
+      const nextCtx = ensureSidebarPendingCtx;
+      ensureSidebarPendingCtx = undefined;
+      ensureSidebarInWindow(undefined, nextCtx);
+    }, 150);
   }
 
   function quitAll(): void {
@@ -698,7 +855,509 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       }
     }
 
-    sidebarSnapshots = snapshotSidebarWindows(listSidebarPanesByProvider().flatMap(({ panes }) => panes));
+    // After resizing, invalidate the sidebar pane cache since widths changed,
+    // and use the already-fetched list for the snapshot (avoid another tmux call).
+    if (panesByProvider.some(({ panes }) => panes.some((pane) => pane.width !== sidebarWidth))) {
+      invalidateSidebarPaneCache();
+    }
+    sidebarSnapshots = snapshotSidebarWindows(allPanes);
+  }
+
+  // --- Focus agent pane (click-to-focus from TUI) ---
+
+  /** Walk up to 3 levels of child processes looking for a command matching any pattern */
+  function matchProcessTree(pid: string, patterns: string[], depth = 0): boolean {
+    if (depth > 2) return false;
+    const children = shell(["pgrep", "-P", pid]);
+    if (!children) return false;
+    for (const childPid of children.split("\n")) {
+      const trimmed = childPid.trim();
+      if (!trimmed) continue;
+      const childCmd = shell(["ps", "-p", trimmed, "-o", "comm="]);
+      if (childCmd && patterns.some((pat) => childCmd.toLowerCase().includes(pat))) return true;
+      if (matchProcessTree(trimmed, patterns, depth + 1)) return true;
+    }
+    return false;
+  }
+
+  const AGENT_TITLE_PATTERNS: Record<string, string[]> = {
+    amp: ["amp"],
+    "claude-code": ["claude"],
+    codex: ["codex"],
+    opencode: ["opencode"],
+  };
+
+  const PANE_HIGHLIGHT_BORDER = "fg=#fab387,bold";
+  const PANE_HIGHLIGHT_MS = 300;
+  const pendingHighlightResets = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** Walk child processes (up to 3 levels) to find a process matching `name`, returning its PID. */
+  function findChildPid(pid: string, name: string, depth = 0): string | undefined {
+    if (depth > 2) return undefined;
+    const children = shell(["pgrep", "-P", pid]);
+    if (!children) return undefined;
+    for (const childPid of children.split("\n")) {
+      const trimmed = childPid.trim();
+      if (!trimmed) continue;
+      const childCmd = shell(["ps", "-p", trimmed, "-o", "comm="]);
+      if (childCmd?.trim().toLowerCase().includes(name)) return trimmed;
+      const found = findChildPid(trimmed, name, depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  type PaneEntry = { id: string; pid: string; cmd: string; title: string };
+
+  /** Claude Code: ~/.claude/sessions/<pid>.json → sessionId */
+  function resolveClaudeCodePane(panes: PaneEntry[], threadId: string): string | undefined {
+    const sessionsDir = join(homedir(), ".claude", "sessions");
+    for (const pane of panes) {
+      const agentPid = findChildPid(pane.pid, "claude");
+      if (!agentPid) continue;
+      try {
+        const data = JSON.parse(readFileSync(join(sessionsDir, `${agentPid}.json`), "utf-8"));
+        if (data.sessionId === threadId) return pane.id;
+      } catch {}
+    }
+    return undefined;
+  }
+
+  /** Codex: logs_1.sqlite process_uuid='pid:<PID>:*' → thread_id */
+  function resolveCodexPane(panes: PaneEntry[], threadId: string): string | undefined {
+    const dbPath = join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "logs_1.sqlite");
+    let db: any;
+    try {
+      const { Database } = require("bun:sqlite");
+      db = new Database(dbPath, { readonly: true });
+    } catch { return undefined; }
+
+    try {
+      for (const pane of panes) {
+        const agentPid = findChildPid(pane.pid, "codex");
+        if (!agentPid) continue;
+        const row = db.query(
+          `SELECT thread_id FROM logs WHERE process_uuid LIKE ? AND thread_id IS NOT NULL ORDER BY ts DESC LIMIT 1`,
+        ).get(`pid:${agentPid}:%`);
+        if (row?.thread_id === threadId) return pane.id;
+      }
+    } finally { try { db.close(); } catch {} }
+    return undefined;
+  }
+
+  /** OpenCode: lsof → log file → grep session ID */
+  function resolveOpenCodePane(panes: PaneEntry[], threadId: string): string | undefined {
+    for (const pane of panes) {
+      const agentPid = findChildPid(pane.pid, "opencode");
+      if (!agentPid) continue;
+      const lsofOut = shell(["lsof", "-p", agentPid]);
+      if (!lsofOut) continue;
+      // Find the log file path from open file descriptors
+      const logLine = lsofOut.split("\n").find((l) => l.includes("/opencode/log/") && l.endsWith(".log"));
+      if (!logLine) continue;
+      // Extract absolute path — lsof NAME column starts at the last recognized path
+      const pathMatch = logLine.match(/\s(\/\S+\.log)$/);
+      if (!pathMatch) continue;
+      try {
+        const logText = readFileSync(pathMatch[1], "utf-8");
+        const match = logText.match(/ses_[A-Za-z0-9]+/);
+        if (match?.[0] === threadId) return pane.id;
+      } catch {}
+    }
+    return undefined;
+  }
+
+  /** Resolve a tmux pane ID for an agent using all available resolution strategies. */
+  function resolveAgentPaneId(sessionName: string, agentName: string, threadId?: string, threadName?: string): string | undefined {
+    const p = sessionProviders.get(sessionName) ?? mux;
+    if (p.name !== "tmux") return undefined;
+
+    const patterns = AGENT_TITLE_PATTERNS[agentName];
+    if (!patterns) return undefined;
+
+    const raw = shell([
+      "tmux", "list-panes", "-t", sessionName,
+      "-F", "#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_title}",
+    ]);
+    if (!raw) return undefined;
+
+    const panes = raw.split("\n")
+      .map((line) => {
+        const idx1 = line.indexOf("|");
+        const idx2 = line.indexOf("|", idx1 + 1);
+        const idx3 = line.indexOf("|", idx2 + 1);
+        return {
+          id: line.slice(0, idx1),
+          pid: line.slice(idx1 + 1, idx2),
+          cmd: line.slice(idx2 + 1, idx3),
+          title: line.slice(idx3 + 1),
+        };
+      });
+
+    const sidebarPaneIds = new Set<string>();
+    for (const { panes: sbPanes } of listSidebarPanesByProvider()) {
+      for (const sb of sbPanes) sidebarPaneIds.add(sb.paneId);
+    }
+    const nonSidebar = panes.filter((p) => !sidebarPaneIds.has(p.id));
+
+    let targetPaneId: string | undefined;
+
+    if (agentName === "claude-code" && threadId) {
+      targetPaneId = resolveClaudeCodePane(nonSidebar, threadId);
+    }
+    if (!targetPaneId && agentName === "amp" && threadName) {
+      targetPaneId = nonSidebar
+        .find((p) => p.title.toLowerCase().startsWith("amp - ") && p.title.includes(threadName))
+        ?.id;
+    }
+    if (!targetPaneId && agentName === "codex" && threadId) {
+      targetPaneId = resolveCodexPane(nonSidebar, threadId);
+    }
+    if (!targetPaneId && agentName === "opencode" && threadId) {
+      targetPaneId = resolveOpenCodePane(nonSidebar, threadId);
+    }
+    if (!targetPaneId) {
+      targetPaneId = nonSidebar
+        .find((p) => patterns.some((pat) => p.title.toLowerCase().includes(pat)))
+        ?.id;
+    }
+    if (!targetPaneId) {
+      for (const pane of nonSidebar) {
+        if (matchProcessTree(pane.pid, patterns)) {
+          targetPaneId = pane.id;
+          break;
+        }
+      }
+    }
+    return targetPaneId;
+  }
+
+  function focusAgentPane(sessionName: string, agentName: string, threadId?: string, threadName?: string): void {
+    log("focus-agent-pane", "received", { sessionName, agentName, threadId, threadName });
+    const targetPaneId = resolveAgentPaneId(sessionName, agentName, threadId, threadName);
+    if (!targetPaneId) return;
+
+    log("focus-agent-pane", "focusing", { sessionName, agentName, paneId: targetPaneId });
+    shell(["tmux", "select-pane", "-t", targetPaneId]);
+
+    const existing = pendingHighlightResets.get(targetPaneId);
+    if (existing) clearTimeout(existing);
+
+    shell(["tmux", "set-option", "-p", "-t", targetPaneId, "pane-active-border-style", PANE_HIGHLIGHT_BORDER]);
+    shell(["tmux", "select-pane", "-t", targetPaneId, "-P", "bg=#2a2a4a"]);
+    pendingHighlightResets.set(
+      targetPaneId,
+      setTimeout(() => {
+        shell(["tmux", "set-option", "-p", "-t", targetPaneId, "-u", "pane-active-border-style"]);
+        shell(["tmux", "select-pane", "-t", targetPaneId, "-P", ""]);
+        pendingHighlightResets.delete(targetPaneId);
+      }, PANE_HIGHLIGHT_MS),
+    );
+  }
+
+  function killAgentPane(sessionName: string, agentName: string, threadId?: string, threadName?: string): void {
+    log("kill-agent-pane", "received", { sessionName, agentName, threadId, threadName });
+    const targetPaneId = resolveAgentPaneId(sessionName, agentName, threadId, threadName);
+    if (!targetPaneId) return;
+
+    log("kill-agent-pane", "killing", { sessionName, agentName, paneId: targetPaneId });
+    shell(["tmux", "kill-pane", "-t", targetPaneId]);
+  }
+
+  // --- Pane agent scanning (detect agents running in current session panes) ---
+
+  interface PaneAgentPresence {
+    agent: string;
+    session: string;
+    paneId: string;
+    threadId?: string;
+    threadName?: string;
+    status?: import("../contracts/agent").AgentStatus;
+    lastSeenTs: number;
+  }
+
+  // Pane agent presence per session: sessionName → Map<instanceKey, PaneAgentPresence>
+  let paneAgentsBySession = new Map<string, Map<string, PaneAgentPresence>>();
+
+  /** Build parent→children map from a single ps snapshot (avoids per-pane pgrep calls). */
+  function buildProcessTree(): { childrenOf: Map<number, number[]>; commOf: Map<number, string> } {
+    const childrenOf = new Map<number, number[]>();
+    const commOf = new Map<number, string>();
+    const psResult = Bun.spawnSync(["ps", "-eo", "pid=,ppid=,comm="], { stdout: "pipe", stderr: "pipe" });
+    for (const line of psResult.stdout.toString().trim().split("\n")) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 3) continue;
+      const pid = parseInt(parts[0], 10);
+      const ppid = parseInt(parts[1], 10);
+      const comm = parts.slice(2).join(" ").toLowerCase();
+      if (isNaN(pid) || isNaN(ppid)) continue;
+      commOf.set(pid, comm);
+      let arr = childrenOf.get(ppid);
+      if (!arr) { arr = []; childrenOf.set(ppid, arr); }
+      arr.push(pid);
+    }
+    return { childrenOf, commOf };
+  }
+
+  /** Walk up to 3 levels of child processes using a pre-built process tree. */
+  function matchProcessTreeFast(
+    pid: number, patterns: string[],
+    tree: ReturnType<typeof buildProcessTree>, depth = 0,
+  ): boolean {
+    if (depth > 2) return false;
+    const children = tree.childrenOf.get(pid);
+    if (!children) return false;
+    for (const childPid of children) {
+      const comm = tree.commOf.get(childPid);
+      if (comm && patterns.some((pat) => comm.includes(pat))) return true;
+      if (matchProcessTreeFast(childPid, patterns, tree, depth + 1)) return true;
+    }
+    return false;
+  }
+
+  /** Find child PID matching a name pattern using pre-built process tree. */
+  function findChildPidFast(
+    pid: number, name: string,
+    tree: ReturnType<typeof buildProcessTree>, depth = 0,
+  ): number | undefined {
+    if (depth > 2) return undefined;
+    const children = tree.childrenOf.get(pid);
+    if (!children) return undefined;
+    for (const childPid of children) {
+      const comm = tree.commOf.get(childPid);
+      if (comm?.includes(name)) return childPid;
+      const found = findChildPidFast(childPid, name, tree, depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  /** Resolve threadId/threadName for an amp pane from its title. */
+  function resolveAmpPaneInfo(title: string): { threadId?: string; threadName?: string } {
+    // Amp pane title format: "amp - <threadName> - <dir>"
+    if (!title.toLowerCase().startsWith("amp - ")) return {};
+    const rest = title.slice(6);
+    const dashIdx = rest.lastIndexOf(" - ");
+    const threadName = dashIdx > 0 ? rest.slice(0, dashIdx) : rest;
+    return { threadName: threadName || undefined };
+  }
+
+  /** Resolve threadId/threadName/status for a Claude Code pane via ~/.claude/sessions/<pid>.json + journal. */
+  function resolveClaudeCodePaneInfo(
+    panePid: number, tree: ReturnType<typeof buildProcessTree>,
+  ): { threadId?: string; threadName?: string; status?: import("../contracts/agent").AgentStatus } {
+    const agentPid = findChildPidFast(panePid, "claude", tree);
+    if (!agentPid) return {};
+    const sessionsDir = join(homedir(), ".claude", "sessions");
+    try {
+      const data = JSON.parse(readFileSync(join(sessionsDir, `${agentPid}.json`), "utf-8"));
+      const threadId: string | undefined = data.sessionId;
+      if (!threadId) return {};
+      // Try to get thread name and status from the journal
+      const journalInfo = resolveClaudeCodeJournalInfo(threadId);
+      return { threadId, ...journalInfo };
+    } catch { return {}; }
+  }
+
+  /** Read the JSONL journal to extract thread name and current status. */
+  function resolveClaudeCodeJournalInfo(threadId: string): { threadName?: string; status?: import("../contracts/agent").AgentStatus } {
+    const projectsDir = join(homedir(), ".claude", "projects");
+    try {
+      const dirs = require("fs").readdirSync(projectsDir) as string[];
+      for (const dir of dirs) {
+        const filePath = join(projectsDir, dir, `${threadId}.jsonl`);
+        try {
+          const text = readFileSync(filePath, "utf-8");
+          const lines = text.split("\n").filter(Boolean);
+          let threadName: string | undefined;
+          let lastStatus: import("../contracts/agent").AgentStatus = "idle";
+
+          for (const line of lines) {
+            try {
+              const entry = JSON.parse(line);
+              const msg = entry.message;
+              if (!msg?.role) continue;
+
+              // Extract thread name from first user message
+              if (!threadName && msg.role === "user") {
+                const content = msg.content;
+                let t: string | undefined;
+                if (typeof content === "string") t = content;
+                else if (Array.isArray(content)) t = content.find((c: any) => c.type === "text" && c.text)?.text;
+                if (t && !t.startsWith("<") && !t.startsWith("{")) threadName = t.slice(0, 80);
+              }
+
+              // Determine status from last entry (same logic as ClaudeCodeAgentWatcher)
+              if (msg.role === "assistant") {
+                const items = Array.isArray(msg.content) ? msg.content : [];
+                lastStatus = items.some((c: any) => c.type === "tool_use") ? "running" : "done";
+              } else if (msg.role === "user") {
+                lastStatus = "running";
+              }
+            } catch { continue; }
+          }
+
+          return { threadName, status: lastStatus };
+        } catch { continue; }
+      }
+    } catch {}
+    return {};
+  }
+
+  /** Resolve threadId for a Codex pane via logs_1.sqlite. */
+  function resolveCodexPaneInfo(
+    panePid: number, tree: ReturnType<typeof buildProcessTree>,
+  ): { threadId?: string; threadName?: string } {
+    const agentPid = findChildPidFast(panePid, "codex", tree);
+    if (!agentPid) return {};
+    const dbPath = join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "logs_1.sqlite");
+    let db: any;
+    try {
+      const { Database } = require("bun:sqlite");
+      db = new Database(dbPath, { readonly: true });
+    } catch { return {}; }
+    try {
+      const row = db.query(
+        `SELECT thread_id FROM logs WHERE process_uuid LIKE ? AND thread_id IS NOT NULL ORDER BY ts DESC LIMIT 1`,
+      ).get(`pid:${agentPid}:%`);
+      if (row?.thread_id) return { threadId: row.thread_id };
+    } catch {} finally { try { db.close(); } catch {} }
+    return {};
+  }
+
+  /** Scan all panes across all tmux sessions and identify running agents.
+   *  Uses a single `tmux list-panes -a` call for efficiency. */
+  function scanAllTmuxPaneAgents(): Map<string, Map<string, PaneAgentPresence>> {
+    const result = new Map<string, Map<string, PaneAgentPresence>>();
+
+    const raw = shell([
+      "tmux", "list-panes", "-a",
+      "-F", "#{session_name}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_title}",
+    ]);
+    if (!raw) return result;
+
+    const panes = raw.split("\n").filter(Boolean).map((line) => {
+      const idx1 = line.indexOf("|");
+      const idx2 = line.indexOf("|", idx1 + 1);
+      const idx3 = line.indexOf("|", idx2 + 1);
+      const idx4 = line.indexOf("|", idx3 + 1);
+      return {
+        session: line.slice(0, idx1),
+        id: line.slice(idx1 + 1, idx2),
+        pid: parseInt(line.slice(idx2 + 1, idx3), 10),
+        cmd: line.slice(idx3 + 1, idx4),
+        title: line.slice(idx4 + 1),
+      };
+    });
+
+    // Exclude sidebar panes
+    const sidebarPaneIds = new Set<string>();
+    for (const { panes: sbPanes } of listSidebarPanesByProvider()) {
+      for (const sb of sbPanes) sidebarPaneIds.add(sb.paneId);
+    }
+
+    const nonSidebar = panes.filter((p) => !sidebarPaneIds.has(p.id));
+    if (nonSidebar.length === 0) return result;
+
+    // Build process tree once for all panes
+    const tree = buildProcessTree();
+    const now = Date.now();
+
+    for (const pane of nonSidebar) {
+      for (const [agentName, patterns] of Object.entries(AGENT_TITLE_PATTERNS)) {
+        // Only use process tree matching — title matching produces false positives
+        // (e.g. an Amp thread named "Detect Claude session names" matches "claude")
+        if (!matchProcessTreeFast(pane.pid, patterns, tree)) continue;
+
+        let threadId: string | undefined;
+        let threadName: string | undefined;
+        let status: import("../contracts/agent").AgentStatus | undefined;
+
+        // Resolve thread info per agent type
+        if (agentName === "amp") {
+          const info = resolveAmpPaneInfo(pane.title);
+          threadName = info.threadName;
+        } else if (agentName === "claude-code") {
+          const info = resolveClaudeCodePaneInfo(pane.pid, tree);
+          threadId = info.threadId;
+          threadName = info.threadName;
+          status = info.status;
+        } else if (agentName === "codex") {
+          const info = resolveCodexPaneInfo(pane.pid, tree);
+          threadId = info.threadId;
+        }
+
+        const key = `${agentName}:pane:${pane.id}`;
+        let sessionAgents = result.get(pane.session);
+        if (!sessionAgents) {
+          sessionAgents = new Map();
+          result.set(pane.session, sessionAgents);
+        }
+        sessionAgents.set(key, {
+          agent: agentName,
+          session: pane.session,
+          paneId: pane.id,
+          threadId,
+          threadName,
+          status,
+          lastSeenTs: now,
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /** Refresh pane agent cache for all tmux sessions. */
+  function refreshPaneAgents(): void {
+    // Check if any provider is tmux
+    const hasTmux = allProviders.some((p) => p.name === "tmux");
+    if (!hasTmux) {
+      if (paneAgentsBySession.size > 0) {
+        paneAgentsBySession.clear();
+        tracker.setPinnedInstancesMulti(new Map());
+        broadcastState();
+      }
+      return;
+    }
+
+    const nextBySession = scanAllTmuxPaneAgents();
+    const allPinnedKeys = new Map<string, string[]>();
+    for (const [session, agents] of nextBySession) {
+      allPinnedKeys.set(session, [...agents.keys()]);
+    }
+
+    // Check if anything changed
+    let changed = paneAgentsBySession.size !== nextBySession.size;
+    if (!changed) {
+      for (const [session, agents] of nextBySession) {
+        const prev = paneAgentsBySession.get(session);
+        if (!prev || prev.size !== agents.size) { changed = true; break; }
+        for (const key of agents.keys()) {
+          if (!prev.has(key)) { changed = true; break; }
+        }
+        if (changed) break;
+      }
+    }
+
+    paneAgentsBySession = nextBySession;
+
+    // Update tracker pinning for all sessions
+    tracker.setPinnedInstancesMulti(allPinnedKeys);
+
+    if (changed) broadcastState();
+  }
+
+  // --- Pane agent polling (detect agents in current session every 3s) ---
+
+  const PANE_SCAN_INTERVAL_MS = 3_000;
+  let paneScanTimer: ReturnType<typeof setInterval> | null = null;
+
+  function startPaneScan() {
+    paneScanTimer = setInterval(() => {
+      if (clientCount === 0) return;
+      refreshPaneAgents();
+    }, PANE_SCAN_INTERVAL_MS);
   }
 
   function handleCommand(cmd: ClientCommand, ws: any) {
@@ -732,6 +1391,19 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         }
 
         p.switchSession(cmd.name, tty);
+
+        // Optimistic server-side focus update — so other TUI instances see the
+        // change immediately via broadcastFocusOnly, without waiting for the
+        // tmux hook round-trip. The hook's /focus POST will reconcile if needed.
+        focusedSession = cmd.name;
+        cachedCurrentSession = cmd.name;
+        cachedCurrentSessionTs = Date.now();
+        const hadUnseen = tracker.handleFocus(cmd.name);
+        if (hadUnseen) {
+          broadcastState();
+        } else {
+          broadcastFocusOnly();
+        }
 
         // Auto-ensure sidebar in the target session if sidebar is visible.
         // In tmux, hooks handle this — but zellij has no hooks, so we do it here.
@@ -817,6 +1489,14 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
           clientTty: clientTtyBySession.get(cmd.sessionName) ?? null,
         }));
         break;
+      case "focus-agent-pane":
+        log("handleCommand", "focus-agent-pane received", { session: cmd.session, agent: cmd.agent, threadId: cmd.threadId, threadName: cmd.threadName });
+        focusAgentPane(cmd.session, cmd.agent, cmd.threadId, cmd.threadName);
+        break;
+      case "kill-agent-pane":
+        log("handleCommand", "kill-agent-pane received", { session: cmd.session, agent: cmd.agent, threadId: cmd.threadId, threadName: cmd.threadName });
+        killAgentPane(cmd.session, cmd.agent, cmd.threadId, cmd.threadName);
+        break;
     }
   }
 
@@ -850,7 +1530,10 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     if (watcherBroadcastTimer) clearTimeout(watcherBroadcastTimer);
     if (debounceTimer) clearTimeout(debounceTimer);
     if (portPollTimer) clearInterval(portPollTimer);
+    if (paneScanTimer) clearInterval(paneScanTimer);
     if (pendingSidebarResize) clearTimeout(pendingSidebarResize);
+    for (const timer of pendingHighlightResets.values()) clearTimeout(timer);
+    pendingHighlightResets.clear();
     for (const watcher of gitHeadWatchers.values()) watcher.close();
     gitHeadWatchers.clear();
     if (idleTimer) clearTimeout(idleTimer);
@@ -932,7 +1615,9 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
           const body = await req.text();
           const ctx = parseContext(body) ?? undefined;
           log("http", "POST /ensure-sidebar", { sidebarVisible, ctx });
-          ensureSidebarInWindow(undefined, ctx);
+          // Debounce ensure-sidebar during rapid switching — intermediate sessions
+          // don't need full sidebar validation immediately.
+          debouncedEnsureSidebar(ctx ?? undefined);
         } catch {}
         return new Response("ok", { status: 200 });
       }
@@ -976,6 +1661,9 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
   for (const p of allProviders) p.setupHooks(SERVER_HOST, SERVER_PORT);
   broadcastState();
   startPortPoll();
+  startPaneScan();
+  // Run initial pane scan
+  refreshPaneAgents();
 
   // Start agent watchers after server is ready
   for (const w of allWatchers) {

@@ -4,11 +4,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/server-common.sh"
 
 find_sidebar_pane() {
-  tmux list-panes -t "$1" -F '#{pane_id} #{pane_title}' 2>/dev/null | awk '$2 == "opensessions" { print $1; exit }'
+  tmux list-panes -t "$1" -F '#{pane_id} #{pane_title}' 2>/dev/null | awk '$2 == "opensessions-sidebar" { print $1; exit }'
 }
 
 sidebar_visible() {
-  tmux list-panes -a -F '#{session_name} #{pane_title}' 2>/dev/null | awk '$1 != "_os_stash" && $2 == "opensessions" { found = 1; exit } END { exit(found ? 0 : 1) }'
+  tmux list-panes -a -F '#{session_name} #{pane_title}' 2>/dev/null | awk '$1 != "_os_stash" && $2 == "opensessions-sidebar" { found = 1; exit } END { exit(found ? 0 : 1) }'
 }
 
 WINDOW_ID="$(tmux display-message -p '#{window_id}' 2>/dev/null)"

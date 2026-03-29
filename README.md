@@ -31,7 +31,7 @@ tmux source-file ~/.tmux.conf
 ~/.tmux/plugins/tpm/bin/install_plugins
 ```
 
-Open the sidebar with `prefix s`.
+Open the sidebar with `prefix o` then `s`.
 
 TPM clones the repo into `~/.tmux/plugins/opensessions`. It does not install a standalone `opensessions` binary. `opensessions` runs from that checkout with your local `bun` installation.
 
