@@ -84,9 +84,16 @@ function persistDetailPanelHeight(sessionName: string, height: number): void {
  *  This must happen from the TUI process — doing it from start.sh races with
  *  capability query responses and leaks escape sequences to the main pane. */
 function refocusMainPane() {
-  const windowId = process.env.REFOCUS_WINDOW;
-  if (muxCtx.type === "tmux" && windowId) {
+  if (muxCtx.type === "tmux") {
     try {
+      // Use the TUI's own pane ID to find its current window (handles stash restore
+      // where the pane may have moved to a different window than the original).
+      const windowId = process.env.REFOCUS_WINDOW
+        || Bun.spawnSync(
+            ["tmux", "display-message", "-t", muxCtx.paneId, "-p", "#{window_id}"],
+            { stdout: "pipe", stderr: "pipe" },
+          ).stdout.toString().trim();
+      if (!windowId) return;
       const r = Bun.spawnSync(
         ["tmux", "list-panes", "-t", windowId, "-F", "#{pane_id} #{pane_title}"],
         { stdout: "pipe", stderr: "pipe" },
@@ -394,18 +401,35 @@ function App() {
     // Refocus the main pane once terminal capability detection finishes.
     // This avoids the race where start.sh refocuses too early and capability
     // responses leak as garbage text into the main pane.
-    let refocused = false;
-    const doRefocus = () => {
-      if (refocused) return;
-      refocused = true;
+    let startupRefocused = false;
+    const doStartupRefocus = () => {
+      if (startupRefocused) return;
+      startupRefocused = true;
       refocusMainPane();
     };
-    renderer.on("capabilities", doRefocus);
+    renderer.on("capabilities", doStartupRefocus);
     // Fallback: if no capability response arrives within 2s, refocus anyway
-    const refocusTimeout = setTimeout(doRefocus, 2000);
+    const refocusTimeout = setTimeout(doStartupRefocus, 2000);
+
+    // When the sidebar pane regains focus (e.g. after stash restore / toggle),
+    // OpenTUI fires restoreTerminalModes which sends capability queries whose
+    // responses would leak as garbage if we move focus away too early.
+    // Wait a short interval for those responses to arrive before refocusing.
+    let postFocusRefocusTimer: ReturnType<typeof setTimeout> | null = null;
+    const onRendererFocus = () => {
+      if (!startupRefocused) return; // startup handler takes care of first focus
+      if (postFocusRefocusTimer) clearTimeout(postFocusRefocusTimer);
+      postFocusRefocusTimer = setTimeout(() => {
+        postFocusRefocusTimer = null;
+        refocusMainPane();
+      }, 200);
+    };
+    renderer.on("focus", onRendererFocus);
     onCleanup(() => {
       clearTimeout(refocusTimeout);
-      renderer.removeListener("capabilities", doRefocus);
+      if (postFocusRefocusTimer) clearTimeout(postFocusRefocusTimer);
+      renderer.removeListener("capabilities", doStartupRefocus);
+      renderer.removeListener("focus", onRendererFocus);
     });
 
     const socket = new WebSocket(`ws://${SERVER_HOST}:${SERVER_PORT}`);

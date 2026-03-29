@@ -790,28 +790,11 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       try {
         const newPaneId = p.spawnSidebar(curSession, windowId, sidebarWidth, sidebarPosition, scriptsDir);
         log("ensure", "spawn result", { newPaneId });
-        // After spawning/restoring sidebar, focus may land on the sidebar or edge pane.
-        // Re-select the first non-sidebar pane so the user's main pane stays focused.
-        if (newPaneId) {
-          const raw = shell([
-            "tmux", "list-panes", "-t", windowId,
-            "-F", "#{pane_id}|#{pane_title}|#{pane_active}",
-          ]);
-          const activePanes = raw.split("\n").filter(Boolean).map((l) => {
-            const [id, ...rest] = l.split("|");
-            const active = rest.pop();
-            const title = rest.join("|");
-            return { id, title, active: active === "1" };
-          });
-          const activeNonSidebar = activePanes.find((ap) => ap.active && ap.title !== "opensessions-sidebar");
-          if (!activeNonSidebar) {
-            const firstNonSidebar = activePanes.find((ap) => ap.title !== "opensessions-sidebar");
-            if (firstNonSidebar) {
-              log("ensure", "refocusing non-sidebar pane after spawn", { paneId: firstNonSidebar.id });
-              shell(["tmux", "select-pane", "-t", firstNonSidebar.id]);
-            }
-          }
-        }
+        // Do NOT refocus the main pane here — the TUI handles it.
+        // For fresh spawns, the TUI refocuses after capability detection.
+        // For stash restores, the TUI refocuses after restoreTerminalModes
+        // responses settle. Refocusing immediately from the server causes
+        // capability query responses to leak as garbage escape sequences.
       } finally {
         pendingSidebarSpawns.delete(spawnKey);
       }

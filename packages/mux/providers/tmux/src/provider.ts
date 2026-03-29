@@ -195,7 +195,10 @@ export class TmuxProvider implements MuxProviderV1, WindowCapable, SidebarCapabl
         const joinFlag = position === "left" ? "-hb" : "-h";
         rawTmux(["join-pane", joinFlag, "-f", "-l", String(width), "-s", stashedPane.id, "-t", targetPane.id]);
         tmux.setPaneTitle(stashedPane.id, SIDEBAR_PANE_TITLE);
-        tmux.selectPane(targetPane.id);
+        // Do NOT selectPane here — same as fresh spawns. The TUI's
+        // restoreTerminalModes fires on focus-in after join-pane, generating
+        // capability query responses. Refocusing the main pane immediately
+        // causes those responses to leak as garbage escape sequences.
         return stashedPane.id;
       }
     } catch { /* stash session doesn't exist yet — spawn fresh */ }
