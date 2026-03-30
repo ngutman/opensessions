@@ -1576,18 +1576,17 @@ function SessionCard(props: SessionCardProps) {
 
         {/* Content */}
         <box flexDirection="column" flexGrow={1} paddingRight={1}>
-          {/* Row 1: name + status */}
+          {/* Row 1: name + agent badge (left) + status icons (right) */}
           <box flexDirection="row">
-            <text truncate flexGrow={1}>
+            <text truncate>
               <span style={{ fg: nameColor(), attributes: props.isFocused || props.isCurrent ? BOLD : undefined }}>
                 {truncName()}
               </span>
-            </text>
-            <Show when={agentBadge()}>
-              <text flexShrink={0}>
+              <Show when={agentBadge()}>
                 <span style={{ fg: agentBadgeColor() }}>{" "}{agentBadge()}</span>
-              </text>
-            </Show>
+              </Show>
+            </text>
+            <box flexGrow={1} />
             <Show when={statusIcon()}>
               <text flexShrink={0}>
                 <span style={{ fg: statusColor() }}>{" "}{statusIcon()}</span>

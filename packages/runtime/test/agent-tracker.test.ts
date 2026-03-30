@@ -359,16 +359,36 @@ describe("AgentTracker", () => {
       expect(changed).toBe(false);
     });
 
-    test("skips pane agent without threadId when watcher tracks that agent", () => {
+    test("enriches watcher entry when pane agent has no threadId", () => {
       tracker.applyEvent(event({ session: "sess-1", agent: "amp", status: "running" }));
 
       const changed = tracker.applyPanePresence("sess-1", [
         { agent: "amp", paneId: "%3" }, // no threadId
       ]);
 
-      // Should not create a duplicate — watcher already tracks amp
-      expect(changed).toBe(false);
+      // Should not create a duplicate — enriches the existing entry
+      expect(changed).toBe(true); // paneId/liveness stamped
       expect(tracker.getAgents("sess-1").length).toBe(1);
+      expect(tracker.getAgents("sess-1")[0]!.paneId).toBe("%3");
+      expect(tracker.getAgents("sess-1")[0]!.liveness).toBe("alive");
+    });
+
+    test("enriches watcher entry when pane scanner has stale threadId", () => {
+      // Watcher tracks the current conversation
+      tracker.applyEvent(event({ session: "sess-1", agent: "claude-code", threadId: "current-convo", status: "running" }));
+
+      // Pane scanner resolves a stale sessionId (from ~/.claude/sessions/<pid>.json)
+      const changed = tracker.applyPanePresence("sess-1", [
+        { agent: "claude-code", paneId: "%21", threadId: "old-stale-convo" },
+      ]);
+
+      // Should not create a duplicate — enriches the existing entry instead
+      expect(changed).toBe(true); // paneId was stamped
+      const agents = tracker.getAgents("sess-1");
+      expect(agents.length).toBe(1);
+      expect(agents[0]!.threadId).toBe("current-convo"); // watcher's threadId preserved
+      expect(agents[0]!.paneId).toBe("%21"); // pane scanner's paneId stamped
+      expect(agents[0]!.liveness).toBe("alive"); // marked alive
     });
 
     test("cleans up synthetic entry when threadId resolves to a watcher entry", () => {

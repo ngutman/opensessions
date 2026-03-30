@@ -275,13 +275,21 @@ export class AgentTracker {
         continue;
       }
 
-      // No threadId from pane scan — check if watcher already tracks any instance of this agent
-      if (!key) {
-        let hasWatcherInstance = false;
+      // If the watcher already tracks a different threadId for this agent in this session,
+      // enrich that entry instead of creating a duplicate. The pane scanner may have a stale
+      // sessionId (e.g. after /clear or /resume) but the pane is still the same live process.
+      {
+        let existingEntry: AgentEvent | null = null;
         for (const [, ev] of sessionInstances) {
-          if (ev.agent === pa.agent) { hasWatcherInstance = true; break; }
+          if (ev.agent === pa.agent) { existingEntry = ev; break; }
         }
-        if (hasWatcherInstance) continue;
+        if (existingEntry) {
+          const wasDifferent = existingEntry.paneId !== pa.paneId || existingEntry.liveness !== "alive";
+          existingEntry.paneId = pa.paneId;
+          existingEntry.liveness = "alive";
+          if (wasDifferent) changed = true;
+          continue;
+        }
       }
 
       // Create synthetic entry for unmatched pane agent
