@@ -85,7 +85,7 @@ Clicking a detected port opens `http://localhost:<port>`.
 
 - The server exposes `new-session` through the mux provider interface.
 - The TUI uses a tmux popup sessionizer when it is running inside tmux.
-- The bundled sessionizer searches `SESSIONIZER_DIR` or `$HOME/Documents`.
+- The bundled sessionizer searches directories listed in `SESSIONIZER_DIR` (colon-separated, e.g. `$HOME/Code:$HOME/.config`) or `$HOME/Documents` if unset. The variable is also read from the tmux global environment (`tmux set-environment -g`) as a fallback.
 - If `fzf` is unavailable, the tmux sessionizer exits with a prompt explaining that dependency.
 
 ## Session Switching Behavior
