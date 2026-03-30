@@ -1613,6 +1613,17 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         return new Response("ok", { status: 200 });
       }
 
+      // pane-exited hook: a pane closed — kill orphaned sidebar panes
+      if (req.method === "POST" && url.pathname === "/pane-exited") {
+        if (sidebarVisible) {
+          invalidateSidebarPaneCache();
+          for (const { provider } of listSidebarPanesByProvider()) {
+            provider.killOrphanedSidebarPanes();
+          }
+        }
+        return new Response("ok", { status: 200 });
+      }
+
       if (req.method === "POST" && url.pathname === "/set-status") {
         try {
           const body = await req.json() as { session?: string; text?: string | null; tone?: string };

@@ -106,6 +106,9 @@ export class TmuxProvider implements MuxProviderV1, WindowCapable, SidebarCapabl
     tmux.setGlobalHook("after-new-window", ensureCmd);
     // client-resized: terminal window changed size — enforce stored width back
     tmux.setGlobalHook("client-resized", clientResizedCmd);
+    // pane-exited: a pane closed — kill orphaned sidebar panes (only pane left in window)
+    const paneExitedCmd = hookPost("/pane-exited");
+    tmux.setGlobalHook("pane-exited", paneExitedCmd);
   }
 
   cleanupHooks(): void {
@@ -116,6 +119,7 @@ export class TmuxProvider implements MuxProviderV1, WindowCapable, SidebarCapabl
     tmux.unsetGlobalHook("after-new-window");
     tmux.unsetGlobalHook("client-resized");
     tmux.unsetGlobalHook("after-resize-pane");
+    tmux.unsetGlobalHook("pane-exited");
   }
 
   getAllPaneCounts(): Map<string, number> {
@@ -239,5 +243,22 @@ export class TmuxProvider implements MuxProviderV1, WindowCapable, SidebarCapabl
 
   resizeSidebarPane(paneId: string, width: number): void {
     tmux.resizePane(paneId, { width });
+  }
+
+  killOrphanedSidebarPanes(): void {
+    const allPanes = tmux.listPanes();
+    // Count panes per window
+    const windowPaneCounts = new Map<string, number>();
+    for (const p of allPanes) {
+      if (p.sessionName === STASH_SESSION) continue;
+      windowPaneCounts.set(p.windowId, (windowPaneCounts.get(p.windowId) ?? 0) + 1);
+    }
+    // Find sidebar panes that are the only pane in their window
+    for (const p of allPanes) {
+      if (p.title !== SIDEBAR_PANE_TITLE || p.sessionName === STASH_SESSION) continue;
+      if (windowPaneCounts.get(p.windowId) === 1) {
+        tmux.killPane(p.id);
+      }
+    }
   }
 }
