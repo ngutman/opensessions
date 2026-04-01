@@ -48,6 +48,10 @@ const STALE_MS = 5 * 60 * 1000;
 const THREAD_NAME_MAX = 80;
 
 export function determineStatus(entry: PiEntry): AgentStatus {
+  // Pi transcripts also include non-message entries like model_change,
+  // thinking_level_change, session_info, branch_summary, and custom types.
+  // They currently don't imply agent state, so we treat them as idle unless
+  // Pi introduces a new entry type with status semantics in the future.
   if (entry.type !== "message") return "idle";
 
   const message = entry.message;
