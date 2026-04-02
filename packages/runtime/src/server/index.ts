@@ -1542,7 +1542,6 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         sidebarWidth = reported;
         saveConfig({ sidebarWidth });
         broadcastState();
-        setPendingEnforcement();
         enforceSidebarWidth(session ?? undefined);
         break;
       }

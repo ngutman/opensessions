@@ -527,9 +527,11 @@ function App() {
 
             setSessions(reconcile(msg.sessions, { key: "name" }));
             setFocusedSession(startupFocus);
+            setCurrentSession(msg.currentSession);
             setTheme(resolveTheme(msg.theme));
           } else if (msg.type === "focus") {
             setFocusedSession(msg.focusedSession);
+            setCurrentSession(msg.currentSession);
           } else if (msg.type === "your-session") {
             setMySession(msg.name);
             setCurrentSession(msg.name);
