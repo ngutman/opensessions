@@ -299,6 +299,10 @@ function App() {
     if (!agent || !data) return;
     appendFileSync("/tmp/opensessions-tui-agent-click.log",
       `[${new Date().toISOString()}] keyboard focus-agent-pane session=${data.name} agent=${agent.agent} threadId=${agent.threadId} threadName=${agent.threadName}\n`);
+    // Switch to the agent's session first so the tmux client is attached
+    setCurrentSession(data.name);
+    send({ type: "switch-session", name: data.name });
+    // Then focus the specific agent pane within that session
     send({
       type: "focus-agent-pane",
       session: data.name,
@@ -862,6 +866,8 @@ function App() {
               onFocusAgentPane={(agent) => {
                 appendFileSync("/tmp/opensessions-tui-agent-click.log",
                   `[${new Date().toISOString()}] sending focus-agent-pane session=${data().name} agent=${agent.agent} threadId=${agent.threadId} threadName=${agent.threadName}\n`);
+                setCurrentSession(data().name);
+                send({ type: "switch-session", name: data().name });
                 send({
                   type: "focus-agent-pane",
                   session: data().name,

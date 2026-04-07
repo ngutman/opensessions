@@ -152,7 +152,7 @@ interface AgentStateMessage {
 }
 
 const DTW_WS_BASE = "wss://production.ampworkers.com";
-const POLL_MS = 1000;
+const POLL_MS = 10_000;
 /** How long to wait before promoting quiet tool boundaries from running → waiting */
 const TOOL_WAIT_MS = 3_000;
 /** How long Amp can stay quiet before we consider the thread stale */
@@ -271,6 +271,7 @@ export class AmpAgentWatcher implements AgentWatcher {
   private stopped = false;
   private lifecycle = 0;
   private wsGeneration = 0;
+  private lastPollAt: string | null = null;
 
   /** Loaded once at start. Overridable for testing. */
   private ampUrl: string | null = null;
@@ -672,7 +673,8 @@ export class AmpAgentWatcher implements AgentWatcher {
     this.requestControllers.add(controller);
 
     try {
-      const res = await this._fetch(url, { ...init, signal: controller.signal });
+      const headers = { "User-Agent": "opensessions", ...init.headers };
+      const res = await this._fetch(url, { ...init, headers, signal: controller.signal });
       if (!this.isActive(lifecycle) || !res.ok) return null;
       return await res.json() as T;
     } catch {
@@ -695,7 +697,10 @@ export class AmpAgentWatcher implements AgentWatcher {
   }
 
   private async fetchThreadList(lifecycle = this.lifecycle): Promise<ApiThreadSummary[] | null> {
-    return this.fetchJson<ApiThreadSummary[]>(`${this.ampUrl}/api/threads?limit=20`, {
+    let url = `${this.ampUrl}/api/threads?limit=20`;
+    if (this.lastPollAt) url += `&after=${encodeURIComponent(this.lastPollAt)}`;
+    this.lastPollAt = new Date().toISOString();
+    return this.fetchJson<ApiThreadSummary[]>(url, {
       headers: { Authorization: `Bearer ${this.apiKey}` },
     }, lifecycle);
   }
