@@ -10,6 +10,7 @@ import { SessionOrder } from "./session-order";
 import { SessionMetadataStore } from "./metadata-store";
 import { buildLocalLinks, loadPortlessState } from "./portless";
 import { loadConfig, saveConfig } from "../config";
+import type { SessionFilterMode } from "../config";
 import {
   clampSidebarWidth,
 } from "./sidebar-width-sync";
@@ -277,6 +278,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
   // Load initial theme from config
   const config = loadConfig();
   let currentTheme: string | undefined = typeof config.theme === "string" ? config.theme : undefined;
+  let currentFilter: SessionFilterMode | undefined = config.sessionFilter;
   let sidebarWidth = clampSidebarWidth(config.sidebarWidth ?? 26);
   let sidebarPosition: "left" | "right" = config.sidebarPosition ?? "left";
   let sidebarVisible = false;
@@ -493,7 +495,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       focusedSession = sessions.find((s) => s.name === currentSession)?.name ?? sessions[0]!.name;
     }
 
-    return { type: "state", sessions, focusedSession, currentSession, theme: currentTheme, sidebarWidth, ts: Date.now() };
+    return { type: "state", sessions, focusedSession, currentSession, theme: currentTheme, sessionFilter: currentFilter, sidebarWidth, ts: Date.now() };
   }
 
   let broadcastPending = false;
@@ -1342,6 +1344,11 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       case "set-theme":
         currentTheme = cmd.theme;
         saveConfig({ theme: cmd.theme });
+        broadcastState();
+        break;
+      case "set-filter":
+        currentFilter = cmd.filter;
+        saveConfig({ sessionFilter: cmd.filter });
         broadcastState();
         break;
       case "quit":

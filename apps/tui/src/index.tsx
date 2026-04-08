@@ -229,10 +229,8 @@ function App() {
   const [isDetailResizing, setIsDetailResizing] = createSignal(false);
   const detailPanelSessionName = createMemo(() => focusedSession() ?? mySession());
 
-  // --- Session filter ---
-  const [sessionFilter, setSessionFilter] = createSignal<SessionFilterMode>(
-    loadConfig().sessionFilter ?? "all",
-  );
+  // --- Session filter (synced from server) ---
+  const [sessionFilter, setSessionFilter] = createSignal<SessionFilterMode>("all");
 
   const filteredSessions = createMemo(() => {
     const mode = sessionFilter();
@@ -249,7 +247,7 @@ function App() {
     const idx = FILTER_CYCLE.indexOf(sessionFilter());
     const next = FILTER_CYCLE[(idx + 1) % FILTER_CYCLE.length]!;
     setSessionFilter(next);
-    saveConfig({ sessionFilter: next });
+    send({ type: "set-filter", filter: next });
     flash(`filter: ${FILTER_LABELS[next]}`);
     // If the focused session is no longer visible, refocus
     const list = filteredSessions();
@@ -580,6 +578,7 @@ function App() {
             setFocusedSession(startupFocus);
             setCurrentSession(msg.currentSession);
             setTheme(resolveTheme(msg.theme));
+            setSessionFilter(msg.sessionFilter ?? "all");
           } else if (msg.type === "focus") {
             setFocusedSession(msg.focusedSession);
             setCurrentSession(msg.currentSession);
