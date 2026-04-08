@@ -693,6 +693,13 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     sidebarPaneCacheTs = 0;
   }
 
+  function reconcileSidebarPresence() {
+    invalidateSidebarPaneCache();
+    const panesByProvider = listSidebarPanesByProvider();
+    sidebarVisible = panesByProvider.some(({ panes }) => panes.length > 0);
+    return panesByProvider;
+  }
+
   const pendingSidebarSpawns = new Set<string>();
 
   function toggleSidebar(ctx?: { session: string; windowId: string }): void {
@@ -702,8 +709,17 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       return;
     }
 
-    invalidateSidebarPaneCache();
-    if (sidebarVisible) {
+    const panesByProvider = reconcileSidebarPresence();
+    const hasPaneInContextWindow = ctx
+      ? panesByProvider.some(({ panes }) => panes.some((pane) => pane.windowId === ctx.windowId))
+      : false;
+
+    // If the server rebooted into a degraded state where only some sidebar
+    // panes survived, treat toggle from a pane-less window as a recovery
+    // request and restore missing panes instead of hiding the lone survivor.
+    const recoverVisibleState = sidebarVisible && ctx && !hasPaneInContextWindow;
+
+    if (sidebarVisible && !recoverVisibleState) {
       for (const p of providers) {
         const panes = p.listSidebarPanes();
         log("toggle", "OFF — hiding panes", { provider: p.name, count: panes.length });
@@ -717,7 +733,10 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       setPendingEnforcement();
       for (const p of providers) {
         const allWindows = p.listActiveWindows();
-        log("toggle", "ON — spawning in active windows", { provider: p.name, count: allWindows.length });
+        log("toggle", recoverVisibleState ? "RECOVER — ensuring active windows" : "ON — spawning in active windows", {
+          provider: p.name,
+          count: allWindows.length,
+        });
         for (const w of allWindows) {
           ensureSidebarInWindow(p, { session: w.sessionName, windowId: w.id });
         }
@@ -1528,6 +1547,15 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         }
         const reported = clampSidebarWidth(cmd.width);
         const session = clientSessionNames.get(ws) ?? null;
+        const current = getCachedCurrentSession();
+
+        // Only the sidebar in the active session is allowed to author width
+        // changes. Background panes still receive resize events, but treating
+        // those as user intent causes global width ping-pong across sessions.
+        if (!session || !current || session !== current) {
+          break;
+        }
+
         if (pendingEnforcement) {
           // Re-arm pendingEnforcement: the enforce call below will resize
           // panes, triggering SIGWINCH echoes that must also be absorbed.
@@ -1822,6 +1850,20 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
   // --- Bootstrap ---
 
   for (const p of allProviders) p.setupHooks(SERVER_HOST, SERVER_PORT);
+  if (reconcileSidebarPresence()) {
+    for (const { provider } of listSidebarPanesByProvider()) {
+      provider.killOrphanedSidebarPanes();
+    }
+    const panesByProvider = reconcileSidebarPresence();
+    if (panesByProvider.some(({ panes }) => panes.length > 0)) {
+      for (const p of getProvidersWithSidebar()) {
+        for (const w of p.listActiveWindows()) {
+          ensureSidebarInWindow(p, { session: w.sessionName, windowId: w.id });
+        }
+      }
+      enforceSidebarWidth();
+    }
+  }
   // Seed port snapshot before first broadcast so clients see ports immediately
   {
     const allMuxSessions: string[] = [];

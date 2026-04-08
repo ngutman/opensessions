@@ -50,4 +50,4 @@ except: print('0')" 2>/dev/null || echo "0")
 fi
 
 CTX="|${SESSION_NAME}|${TAB_ID}"
-curl -s -o /dev/null -X POST "http://${HOST}:${PORT}/toggle" -d "$CTX"
+curl -s -o /dev/null -m 0.2 --connect-timeout 0.1 -X POST "http://${HOST}:${PORT}/toggle" -d "$CTX"

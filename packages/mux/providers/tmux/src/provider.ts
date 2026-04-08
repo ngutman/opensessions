@@ -88,7 +88,7 @@ export class TmuxProvider implements MuxProviderV1, WindowCapable, SidebarCapabl
     const base = `http://${serverHost}:${serverPort}`;
     const hookPost = (path: string, data?: string) => {
       const body = data ? ` -d '${data}'` : "";
-      return `run-shell -b "curl -s -o /dev/null -X POST ${base}${path}${body} >/dev/null 2>&1 || true"`;
+      return `run-shell -b "curl -s -o /dev/null -m 0.2 --connect-timeout 0.1 -X POST ${base}${path}${body} >/dev/null 2>&1 || true"`;
     };
     // tmux expands #{} formats at hook-fire time — no need for $(tmux display-message)
     // Use | as field separator (safe for session names, window IDs, TTYs)
