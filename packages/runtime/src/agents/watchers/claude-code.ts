@@ -79,6 +79,7 @@ interface ContentItem {
 
 interface JournalEntry {
   type?: string;
+  customTitle?: string;
   message?: {
     role?: string;
     stop_reason?: string | null;
@@ -197,6 +198,11 @@ export function isToolUseEntry(entry: JournalEntry): boolean {
   const content = msg.content;
   if (!Array.isArray(content)) return false;
   return content.some((c) => c.type === "tool_use");
+}
+
+function extractCustomTitle(entry: JournalEntry): string | undefined {
+  if (entry.type === "custom-title" && entry.customTitle) return entry.customTitle;
+  return undefined;
 }
 
 function extractThreadName(entry: JournalEntry): string | undefined {
@@ -340,7 +346,9 @@ export class ClaudeCodeAgentWatcher implements AgentWatcher {
       for (const line of lines) {
         let entry: JournalEntry;
         try { entry = JSON.parse(line); } catch { continue; }
-        if (!threadName) {
+        const customTitle = extractCustomTitle(entry);
+        if (customTitle) { threadName = customTitle; continue; }
+        else if (!threadName) {
           const name = extractThreadName(entry);
           if (name) threadName = name;
         }
@@ -379,7 +387,9 @@ export class ClaudeCodeAgentWatcher implements AgentWatcher {
       let entry: JournalEntry;
       try { entry = JSON.parse(line); } catch { continue; }
 
-      if (!threadName) {
+      const customTitle = extractCustomTitle(entry);
+      if (customTitle) { threadName = customTitle; continue; }
+      else if (!threadName) {
         const name = extractThreadName(entry);
         if (name) threadName = name;
       }
@@ -390,11 +400,12 @@ export class ClaudeCodeAgentWatcher implements AgentWatcher {
     }
 
     const prevStatus = prev?.status;
+    const prevThreadName = prev?.threadName;
     const now = Date.now();
     const toolUseSeenAt = lastEntryIsToolUse && latestStatus === "running" ? now : undefined;
     this.sessions.set(threadId, { status: latestStatus, fileSize: size, threadName, projectDir, toolUseSeenAt, lastGrowthAt: now });
 
-    if (latestStatus !== prevStatus) {
+    if (latestStatus !== prevStatus || threadName !== prevThreadName) {
       this.emitStatus(threadId, this.sessions.get(threadId)!);
     }
   }
