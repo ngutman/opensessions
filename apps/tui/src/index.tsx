@@ -231,6 +231,8 @@ function App() {
 
   // --- Session filter (synced from server) ---
   const [sessionFilter, setSessionFilter] = createSignal<SessionFilterMode>("all");
+  const [initializing, setInitializing] = createSignal(false);
+  const [initLabel, setInitLabel] = createSignal("");
 
   const filteredSessions = createMemo(() => {
     const mode = sessionFilter();
@@ -575,13 +577,22 @@ function App() {
             }
 
             setSessions(reconcile(msg.sessions, { key: "name" }));
-            setFocusedSession(startupFocus);
+            // Don't override user's focused session during initialization —
+            // staggered spawns cause frequent state broadcasts that would
+            // keep yanking focus away from what the user is looking at.
+            if (!msg.initializing) {
+              setFocusedSession(startupFocus);
+            }
             setCurrentSession(msg.currentSession);
             setTheme(resolveTheme(msg.theme));
             setSessionFilter(msg.sessionFilter ?? "all");
+            setInitializing(msg.initializing ?? false);
+            setInitLabel(msg.initLabel ?? "");
           } else if (msg.type === "focus") {
-            setFocusedSession(msg.focusedSession);
-            setCurrentSession(msg.currentSession);
+            if (!initializing()) {
+              setFocusedSession(msg.focusedSession);
+              setCurrentSession(msg.currentSession);
+            }
           } else if (msg.type === "your-session") {
             setMySession(msg.name);
             setCurrentSession(msg.name);
@@ -629,7 +640,7 @@ function App() {
   );
 
   createEffect(() => {
-    if (!hasRunning()) return;
+    if (!hasRunning() && !initializing()) return;
     const interval = setInterval(() => {
       setSpinIdx((i) => (i + 1) % SPINNERS.length);
     }, 120);
@@ -829,6 +840,7 @@ function App() {
             <span style={{ fg: P().lavender, attributes: DIM }}>{" "}{"⏻ "}{FILTER_LABELS[sessionFilter()]}</span>
           </Show>
           {runningCount() > 0 ? <span style={{ fg: P().yellow }}>{" "}{"⚡"}{runningCount()}</span> : ""}
+          <Show when={initializing()}><span style={{ fg: P().peach, attributes: DIM }}>{" "}{"◐◓◑◒"[spinIdx() % 4]} {initLabel() || "warming up…"}</span></Show>
           <Show when={flashMessage()}><span style={{ fg: P().overlay0, attributes: DIM }}>{" "}{flashMessage()}</span></Show>
           {errorCount() > 0 ? <span style={{ fg: P().red }}>{" "}{"✗"}{errorCount()}</span> : ""}
           {unseenCount() > 0 ? <span style={{ fg: P().teal }}>{" "}{"●"}{" "}{unseenCount()}</span> : ""}

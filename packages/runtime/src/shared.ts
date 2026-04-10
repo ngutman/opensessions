@@ -42,6 +42,8 @@ export interface ServerState {
   theme: string | undefined;
   sessionFilter: SessionFilterMode | undefined;
   sidebarWidth: number;
+  initializing: boolean;
+  initLabel?: string;
   ts: number;
 }
 
