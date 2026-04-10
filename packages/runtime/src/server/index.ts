@@ -718,7 +718,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
           ensureSidebarInWindow(p, { session: w.sessionName, windowId: w.id });
         }
       }
-      enforceSidebarWidth();
+      scheduleSidebarWidthEnforcement();
       server.publish("sidebar", JSON.stringify({ type: "re-identify" }));
     }
     log("toggle", "done", { sidebarVisible });
@@ -785,7 +785,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     }
     // Always enforce width — session switches can change window width,
     // causing tmux to proportionally redistribute pane sizes.
-    enforceSidebarWidth();
+    scheduleSidebarWidthEnforcement();
   }
 
   // Debounced ensure-sidebar — collapses rapid hook-fired calls during fast
@@ -794,14 +794,32 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
   let ensureSidebarPendingCtx: { session: string; windowId: string } | undefined;
 
   function debouncedEnsureSidebar(ctx?: { session: string; windowId: string }): void {
-    if (ctx) ensureSidebarPendingCtx = ctx;
-    if (ensureSidebarTimer) clearTimeout(ensureSidebarTimer);
-    ensureSidebarTimer = setTimeout(() => {
-      ensureSidebarTimer = null;
-      const nextCtx = ensureSidebarPendingCtx;
-      ensureSidebarPendingCtx = undefined;
-      ensureSidebarInWindow(undefined, nextCtx);
-    }, 150);
+   if (ctx) ensureSidebarPendingCtx = ctx;
+   if (ensureSidebarTimer) clearTimeout(ensureSidebarTimer);
+   ensureSidebarTimer = setTimeout(() => {
+     ensureSidebarTimer = null;
+     const nextCtx = ensureSidebarPendingCtx;
+     ensureSidebarPendingCtx = undefined;
+     ensureSidebarInWindow(undefined, nextCtx);
+   }, 150);
+  }
+
+  // Debounced width enforcement — collapses resize storms (monitor switch,
+  // terminal resize) into a single tmux resize pass.
+  let sidebarEnforceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function scheduleSidebarWidthEnforcement(): void {
+   if (!sidebarVisible) return;
+   log("scheduleEnforce", "scheduling debounced enforcement", { sidebarWidth });
+   setPendingEnforcement();
+   if (sidebarEnforceTimer) clearTimeout(sidebarEnforceTimer);
+   sidebarEnforceTimer = setTimeout(() => {
+     sidebarEnforceTimer = null;
+     log("scheduleEnforce", "FIRING debounced enforcement", { sidebarVisible, sidebarWidth });
+     if (sidebarVisible) {
+       enforceSidebarWidth();
+     }
+   }, 150);
   }
 
   function quitAll(): void {
@@ -825,37 +843,46 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
 
   // --- Sidebar width enforcement ---
 
-  // When true, the next report-width from a TUI is a proportional resize echo
-  // (caused by session switch, terminal resize, etc.), NOT a user drag.
-  // Set by /focus, /ensure-sidebar, /client-resized hooks; cleared by report-width
-  // or auto-expires after 500ms (in case no SIGWINCH fires, e.g. width didn't change).
+  // When true, report-width messages from TUIs are SIGWINCH echoes caused
+  // by server-side tmux resizes — ignore them instead of treating as user drag.
+  // Auto-expires after 500ms.
   let pendingEnforcement = false;
   let pendingEnforcementTimer: ReturnType<typeof setTimeout> | null = null;
 
   function setPendingEnforcement() {
+    log("pendingEnforcement", "SET");
     pendingEnforcement = true;
     if (pendingEnforcementTimer) clearTimeout(pendingEnforcementTimer);
     pendingEnforcementTimer = setTimeout(() => {
       if (pendingEnforcement) {
+        log("pendingEnforcement", "EXPIRED (500ms)");
         pendingEnforcement = false;
       }
       pendingEnforcementTimer = null;
     }, 500);
   }
 
+  let enforcing = false;
+
   function enforceSidebarWidth(skipSession?: string) {
-    invalidateSidebarPaneCache();
-    for (const { provider, panes } of listSidebarPanesByProvider()) {
-      for (const pane of panes) {
-        if (pane.width === sidebarWidth) {
-          continue;
+    if (enforcing) {
+      log("enforce", "SKIPPED — re-entrancy guard");
+      return;
+    }
+    enforcing = true;
+    log("enforce", "START", { sidebarWidth, skipSession, pendingEnforcement });
+    try {
+      invalidateSidebarPaneCache();
+      for (const { provider, panes } of listSidebarPanesByProvider()) {
+        for (const pane of panes) {
+          if (pane.width === sidebarWidth) continue;
+          if (skipSession && pane.sessionName === skipSession) continue;
+          log("enforce", `${pane.paneId} ${pane.width}→${sidebarWidth}`);
+          provider.resizeSidebarPane(pane.paneId, sidebarWidth);
         }
-        if (skipSession && pane.sessionName === skipSession) {
-          continue;
-        }
-        log("enforce", `${pane.paneId} ${pane.width}→${sidebarWidth}`);
-        provider.resizeSidebarPane(pane.paneId, sidebarWidth);
       }
+    } finally {
+      enforcing = false;
     }
   }
 
@@ -1368,6 +1395,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         break;
       case "report-width": {
         if (!sidebarVisible) {
+          log("report-width", "SKIP — sidebar not visible");
           break;
         }
         const reported = clampSidebarWidth(cmd.width);
@@ -1378,23 +1406,25 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         // changes. Background panes still receive resize events, but treating
         // those as user intent causes global width ping-pong across sessions.
         if (!session || !current || session !== current) {
+          log("report-width", "SKIP — not active session", { reported, session, current, pendingEnforcement });
           break;
         }
 
         if (pendingEnforcement) {
-          // Re-arm pendingEnforcement: the enforce call below will resize
-          // panes, triggering SIGWINCH echoes that must also be absorbed.
-          setPendingEnforcement();
-          enforceSidebarWidth();
+          // Ignore SIGWINCH echoes caused by server-side tmux resizes.
+          log("report-width", "SUPPRESSED (pendingEnforcement)", { reported, sidebarWidth, session });
           break;
         }
         if (reported === sidebarWidth) {
+          log("report-width", "SKIP — same width", { reported, sidebarWidth });
           break;
         }
         const oldWidth = sidebarWidth;
+        log("report-width", "ACCEPTED as user drag", { reported, oldWidth, session });
         sidebarWidth = reported;
         saveConfig({ sidebarWidth });
         broadcastState();
+        setPendingEnforcement();
         enforceSidebarWidth(session ?? undefined);
         break;
       }
@@ -1422,6 +1452,8 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     for (const w of allWatchers) w.stop();
     if (watcherBroadcastTimer) clearTimeout(watcherBroadcastTimer);
     if (debounceTimer) clearTimeout(debounceTimer);
+    if (sidebarEnforceTimer) clearTimeout(sidebarEnforceTimer);
+    if (pendingEnforcementTimer) clearTimeout(pendingEnforcementTimer);
     if (portPollTimer) clearInterval(portPollTimer);
     if (paneScanTimer) clearInterval(paneScanTimer);
     for (const timer of pendingHighlightResets.values()) clearTimeout(timer);
@@ -1512,10 +1544,8 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
 
       // client-resized hook: terminal window changed size — enforce stored width
       if (req.method === "POST" && url.pathname === "/client-resized") {
-        setPendingEnforcement();
-        if (sidebarVisible) {
-          enforceSidebarWidth();
-        }
+        log("http", "POST /client-resized", { sidebarVisible, sidebarWidth, pendingEnforcement });
+        scheduleSidebarWidthEnforcement();
         return new Response("ok", { status: 200 });
       }
 
@@ -1686,7 +1716,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
           ensureSidebarInWindow(p, { session: w.sessionName, windowId: w.id });
         }
       }
-      enforceSidebarWidth();
+      scheduleSidebarWidthEnforcement();
     }
   }
   // Seed port snapshot before first broadcast so clients see ports immediately
