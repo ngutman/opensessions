@@ -2,8 +2,16 @@ import type { AgentStatus, AgentEvent } from "./contracts/agent";
 import type { MuxSessionInfo } from "./contracts/mux";
 import type { SessionFilterMode } from "./config";
 
-export const SERVER_PORT = 7391;
-export const SERVER_HOST = "127.0.0.1";
+export const SERVER_PORT = Number(process.env.OPENSESSIONS_PORT ?? 7391);
+// Bind address for the HTTP server. Override with OPENSESSIONS_HOST to
+// accept POSTs from other hosts (e.g. "0.0.0.0" to listen on all
+// interfaces, or a specific bridge IP such as "10.4.250.1"). Defaults
+// to loopback so out-of-the-box installs stay local-only.
+export const SERVER_HOST = process.env.OPENSESSIONS_HOST ?? "127.0.0.1";
+// Address that local in-process hooks use to reach the server. Always
+// loopback — remote callers should build their own URL pointing at
+// whichever address SERVER_HOST is bound to.
+export const LOCAL_CLIENT_HOST = "127.0.0.1";
 export const PID_FILE = "/tmp/opensessions.pid";
 export const SERVER_IDLE_TIMEOUT_MS = 30_000;
 export const STUCK_RUNNING_TIMEOUT_MS = 3 * 60 * 1000;
