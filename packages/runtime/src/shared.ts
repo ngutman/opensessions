@@ -122,7 +122,7 @@ export type ClientCommand =
   | { type: "set-filter"; filter: SessionFilterMode }
   | { type: "identify"; clientTty: string }
   | { type: "quit" }
-  | { type: "identify-pane"; paneId: string; sessionName: string }
+  | { type: "identify-pane"; paneId: string; sessionName: string; windowId?: string }
   | { type: "focus-agent-pane"; session: string; agent: string; threadId?: string; threadName?: string }
   | { type: "kill-agent-pane"; session: string; agent: string; threadId?: string; threadName?: string }
   | { type: "report-width"; width: number };

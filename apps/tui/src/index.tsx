@@ -4,6 +4,7 @@ import { createSignal, createEffect, onCleanup, onMount, batch, For, Show, creat
 import { createStore, reconcile } from "solid-js/store";
 import { useKeyboard, useRenderer } from "@opentui/solid";
 import { TextAttributes, type MouseEvent, type InputRenderable, type KeyEvent } from "@opentui/core";
+import { resolveSyncedFocus } from "./focus-sync";
 
 import { ensureServer } from "@opensessions/runtime";
 import {
@@ -189,7 +190,7 @@ function getClientTty(): string {
       const client = clients.find((c) => c.sessionName === sessName);
       if (client) return client.tty;
     }
-    return sdk.getClientTty();
+    return "";
   }
   // Zellij doesn't expose client TTY
   return "";
@@ -203,6 +204,15 @@ function getLocalSessionName(): string | null {
 
   if (muxCtx.type === "zellij") {
     return muxCtx.sessionName || null;
+  }
+
+  return null;
+}
+
+function getLocalWindowId(): string | null {
+  if (muxCtx.type === "tmux") {
+    const windowId = muxCtx.sdk.display("#{window_id}", { target: muxCtx.paneId });
+    return windowId || null;
   }
 
   return null;
@@ -297,7 +307,6 @@ function App() {
     // the server/hook round-trip from the next-Tab decision.
     // The server's focus/state broadcast will reconcile if needed.
     setCurrentSession(name);
-    setMySession(name);
     setFocusedSession(name);
     setPanelFocus("sessions");
     setFocusedAgentIdx(0);
@@ -307,9 +316,10 @@ function App() {
   function reIdentify() {
     const sessionName = getLocalSessionName();
     if (!sessionName) return;
+    const windowId = getLocalWindowId() ?? undefined;
 
     if (muxCtx.type === "tmux") {
-      send({ type: "identify-pane", paneId: muxCtx.paneId, sessionName });
+      send({ type: "identify-pane", paneId: muxCtx.paneId, sessionName, windowId });
     } else if (muxCtx.type === "zellij") {
       send({ type: "identify-pane", paneId: muxCtx.paneId, sessionName });
     }
@@ -562,12 +572,19 @@ function App() {
         const msg = JSON.parse(event.data as string) as ServerMessage;
         let startupFocusToPublish: string | null = null;
         batch(() => {
+          const localSessionName = mySession() ?? startupSessionName;
+
           if (msg.type === "state") {
             const startupFocus = !startupFocusSynced
               && startupSessionName
               && msg.sessions.some((session) => session.name === startupSessionName)
               ? startupSessionName
               : msg.focusedSession;
+            const nextFocusedSession = resolveSyncedFocus(
+              startupFocus,
+              msg.currentSession,
+              localSessionName,
+            );
 
             if (startupFocus === startupSessionName) {
               startupFocusSynced = true;
@@ -581,7 +598,7 @@ function App() {
             // staggered spawns cause frequent state broadcasts that would
             // keep yanking focus away from what the user is looking at.
             if (!msg.initializing) {
-              setFocusedSession(startupFocus);
+              setFocusedSession(nextFocusedSession);
             }
             setCurrentSession(msg.currentSession);
             setTheme(resolveTheme(msg.theme));
@@ -590,7 +607,7 @@ function App() {
             setInitLabel(msg.initLabel ?? "");
           } else if (msg.type === "focus") {
             if (!initializing()) {
-              setFocusedSession(msg.focusedSession);
+              setFocusedSession(resolveSyncedFocus(msg.focusedSession, msg.currentSession, localSessionName));
               setCurrentSession(msg.currentSession);
             }
           } else if (msg.type === "your-session") {
