@@ -64,14 +64,15 @@ CURRENT_VERSION="${CURRENT_DIR}:$(grep -o '"version": *"[^"]*"' "$CURRENT_DIR/pa
 RUNNING_VERSION=""
 [ -f "$VERSION_FILE" ] && RUNNING_VERSION=$(cat "$VERSION_FILE" 2>/dev/null)
 
-if [ "$CURRENT_VERSION" != "$RUNNING_VERSION" ] && [ -f /tmp/opensessions.pid ]; then
-  kill "$(cat /tmp/opensessions.pid)" 2>/dev/null || true
-  rm -f /tmp/opensessions.pid
-fi
-echo -n "$CURRENT_VERSION" > "$VERSION_FILE"
+if [ "$CURRENT_VERSION" != "$RUNNING_VERSION" ]; then
+  if [ -f /tmp/opensessions.pid ]; then
+    kill "$(cat /tmp/opensessions.pid)" 2>/dev/null || true
+    rm -f /tmp/opensessions.pid
+  fi
 
-# --- Bootstrap: install deps if needed ---
-if [ ! -d "$CURRENT_DIR/node_modules" ]; then
+  echo -n "$CURRENT_VERSION" > "$VERSION_FILE"
+
+  # --- Bootstrap: install deps on version change ---
   BUN_PATH="$(command -v bun 2>/dev/null || echo "$HOME/.bun/bin/bun")"
   if [ -x "$BUN_PATH" ]; then
     (cd "$CURRENT_DIR" && "$BUN_PATH" install --frozen-lockfile 2>/tmp/opensessions-install.log) &
