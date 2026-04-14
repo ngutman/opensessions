@@ -127,6 +127,18 @@ describe("AgentTracker", () => {
     expect(tracker.getUnseen()).not.toContain("sess-1");
   });
 
+  test("dedupeInstanceToSession removes duplicate watcher instance from other sessions", () => {
+    tracker.applyEvent(event({ session: "sess-1", agent: "pi", threadId: "shared", status: "running" }));
+    tracker.applyEvent(event({ session: "sess-2", agent: "pi", threadId: "shared", status: "running" }));
+
+    const changed = tracker.dedupeInstanceToSession("sess-2", "pi", "shared");
+
+    expect(changed).toBe(true);
+    expect(tracker.getAgents("sess-1")).toHaveLength(0);
+    expect(tracker.getAgents("sess-2")).toHaveLength(1);
+    expect(tracker.getAgents("sess-2")[0]!.threadId).toBe("shared");
+  });
+
   // --- pruneStuck ---
 
   test("pruneStuck removes running states older than timeout", () => {
@@ -390,16 +402,45 @@ describe("AgentTracker", () => {
       expect(agents[0]!.liveness).toBe("alive");
     });
 
-    test("cleans up synthetic entry when watcher creates entry for same agent", () => {
-      // Scanner detects agent before watcher → creates synthetic
+    test("enriches exact watcher entry when pane presence includes threadId", () => {
+      tracker.applyEvent(event({ session: "sess-1", agent: "pi", threadId: "thread-a", status: "running" }));
+      tracker.applyEvent(event({ session: "sess-1", agent: "pi", threadId: "thread-b", status: "running" }));
+
+      const changed = tracker.applyPanePresence("sess-1", [
+        { agent: "pi", paneId: "%31", threadId: "thread-b" },
+      ]);
+
+      expect(changed).toBe(true);
+      const agents = tracker.getAgents("sess-1");
+      expect(agents.find((agent) => agent.threadId === "thread-a")?.paneId).toBeUndefined();
+      expect(agents.find((agent) => agent.threadId === "thread-b")?.paneId).toBe("%31");
+    });
+
+    test("keeps ambiguous same-agent watcher entries separate when pane presence has no threadId", () => {
+      tracker.applyEvent(event({ session: "sess-1", agent: "pi", threadId: "thread-a", status: "running" }));
+      tracker.applyEvent(event({ session: "sess-1", agent: "pi", threadId: "thread-b", status: "running" }));
+
+      const changed = tracker.applyPanePresence("sess-1", [
+        { agent: "pi", paneId: "%21" },
+      ]);
+
+      expect(changed).toBe(true);
+      const agents = tracker.getAgents("sess-1");
+      expect(agents).toHaveLength(3);
+      expect(agents.filter((agent) => agent.agent === "pi" && agent.threadId)).toHaveLength(2);
+      expect(agents.find((agent) => agent.threadId === undefined)?.paneId).toBe("%21");
+    });
+
+    test("cleans up synthetic entry when watcher creates entry for same exact thread", () => {
       tracker.applyPanePresence("sess-1", [
-        { agent: "claude-code", paneId: "%21" },
+        { agent: "pi", paneId: "%21", threadId: "abc" },
       ]);
       expect(tracker.getAgents("sess-1").length).toBe(1);
       expect(tracker.getAgents("sess-1")[0]!.paneId).toBe("%21");
+      expect(tracker.getAgents("sess-1")[0]!.threadId).toBe("abc");
 
-      // Watcher catches up → creates entry with threadId, auto-cleans synthetic
-      tracker.applyEvent(event({ session: "sess-1", agent: "claude-code", threadId: "abc", status: "running" }));
+      // Watcher catches up → creates entry with same threadId, auto-cleans synthetic
+      tracker.applyEvent(event({ session: "sess-1", agent: "pi", threadId: "abc", status: "running" }));
       const agents = tracker.getAgents("sess-1");
       expect(agents.length).toBe(1);
       expect(agents[0]!.threadId).toBe("abc");

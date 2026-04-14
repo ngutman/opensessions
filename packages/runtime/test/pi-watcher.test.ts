@@ -70,6 +70,7 @@ describe("PiAgentWatcher", () => {
     events = [];
     ctx = {
       resolveSession: (dir) => dir === "/projects/myapp" ? "myapp-session" : null,
+      resolveThreadOwner: () => null,
       emit: (event) => events.push(event),
     };
 
@@ -176,5 +177,56 @@ describe("PiAgentWatcher", () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.status).toBe("running");
     expect(events[0]!.threadId).toBe("abcdefab-cdef-cdef-cdef-abcdefabcdef");
+  });
+
+  test("falls back to live thread ownership when cwd does not map to a mux session", async () => {
+    ctx.resolveSession = () => null;
+    ctx.resolveThreadOwner = (agent, threadId) =>
+      agent === "pi" && threadId === "12345678-1234-1234-1234-123456789abc"
+        ? { session: "myapp-session", paneId: "%4" }
+        : null;
+
+    watcher.start(ctx);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.session).toBe("myapp-session");
+    expect(events[0]!.threadId).toBe("12345678-1234-1234-1234-123456789abc");
+    expect(events[0]!.status).toBe("running");
+  });
+
+  test("uses live thread ownership even when the transcript header has no cwd", async () => {
+    writeFileSync(sessionFile,
+      JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "12345678-1234-1234-1234-123456789abc",
+        timestamp: "2026-03-27T12:00:00.000Z",
+      }) + "\n" +
+      JSON.stringify({
+        type: "message",
+        id: "msg-user-1",
+        parentId: null,
+        timestamp: "2026-03-27T12:00:01.000Z",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "Fix the watcher status mapping" }],
+          timestamp: 1774612801000,
+        },
+      }) + "\n",
+    );
+
+    ctx.resolveSession = () => null;
+    ctx.resolveThreadOwner = (agent, threadId) =>
+      agent === "pi" && threadId === "12345678-1234-1234-1234-123456789abc"
+        ? { session: "myapp-session", paneId: "%4" }
+        : null;
+
+    watcher.start(ctx);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.session).toBe("myapp-session");
+    expect(events[0]!.status).toBe("running");
   });
 });

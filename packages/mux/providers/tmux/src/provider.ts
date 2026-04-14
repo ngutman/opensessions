@@ -276,17 +276,28 @@ export class TmuxProvider implements MuxProviderV1, WindowCapable, SidebarCapabl
 
   killOrphanedSidebarPanes(): void {
     const allPanes = tmux.listPanes();
-    // Count panes per window
+    // Count panes per window and collect sidebar panes by window.
     const windowPaneCounts = new Map<string, number>();
+    const sidebarsByWindow = new Map<string, typeof allPanes>();
     for (const p of allPanes) {
       if (p.sessionName === STASH_SESSION) continue;
       windowPaneCounts.set(p.windowId, (windowPaneCounts.get(p.windowId) ?? 0) + 1);
+      if (p.title !== SIDEBAR_PANE_TITLE) continue;
+      const panes = sidebarsByWindow.get(p.windowId) ?? [];
+      panes.push(p);
+      sidebarsByWindow.set(p.windowId, panes);
     }
-    // Find sidebar panes that are the only pane in their window
-    for (const p of allPanes) {
-      if (p.title !== SIDEBAR_PANE_TITLE || p.sessionName === STASH_SESSION) continue;
-      if (windowPaneCounts.get(p.windowId) === 1) {
-        tmux.killPane(p.id);
+
+    for (const [windowId, sidebars] of sidebarsByWindow) {
+      if (windowPaneCounts.get(windowId) === 1) {
+        for (const pane of sidebars) tmux.killPane(pane.id);
+        continue;
+      }
+      if (sidebars.length <= 1) continue;
+      // Defensive cleanup: keep a single sidebar per window, kill extras.
+      for (const pane of sidebars.slice(1)) {
+        plog("killOrphanedSidebarPanes: killing duplicate sidebar", { paneId: pane.id, windowId });
+        tmux.killPane(pane.id);
       }
     }
   }

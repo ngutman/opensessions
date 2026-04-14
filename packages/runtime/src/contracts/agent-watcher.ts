@@ -5,9 +5,16 @@ import type { AgentEvent } from "./agent";
  * Lets watchers resolve project directories to mux session names
  * and emit events without knowing about server internals.
  */
+export interface AgentThreadOwner {
+  session: string;
+  paneId?: string;
+}
+
 export interface AgentWatcherContext {
   /** Resolve a project directory path to a mux session name, or null if unmatched */
   resolveSession(projectDir: string): string | null;
+  /** Resolve the live owner for a specific agent thread when pane-backed identity is available. */
+  resolveThreadOwner?(agent: string, threadId?: string): AgentThreadOwner | null;
   /** Emit an agent event (applied to tracker + broadcast automatically) */
   emit(event: AgentEvent): void;
 }

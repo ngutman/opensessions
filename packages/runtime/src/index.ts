@@ -19,7 +19,7 @@ export {
 } from "./contracts/mux";
 export type { AgentStatus, AgentLiveness, AgentEvent, PanePresenceInput } from "./contracts/agent";
 export { TERMINAL_STATUSES } from "./contracts/agent";
-export type { AgentWatcher, AgentWatcherContext } from "./contracts/agent-watcher";
+export type { AgentWatcher, AgentWatcherContext, AgentThreadOwner } from "./contracts/agent-watcher";
 export { AgentTracker } from "./agents/tracker";
 export { AmpAgentWatcher } from "./agents/watchers/amp";
 export { ClaudeCodeAgentWatcher } from "./agents/watchers/claude-code";

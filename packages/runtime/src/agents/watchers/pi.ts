@@ -12,7 +12,7 @@
 import { watch, type FSWatcher } from "fs";
 import { readdir, stat } from "fs/promises";
 import { homedir } from "os";
-import { basename, dirname, join } from "path";
+import { basename, join } from "path";
 import type { AgentStatus } from "../../contracts/agent";
 import type {
   AgentWatcher,
@@ -201,6 +201,15 @@ export class PiAgentWatcher implements AgentWatcher {
     this.ctx = null;
   }
 
+  private resolveEventSession(threadId: string, snapshot: SessionSnapshot): string | null {
+    if (!this.ctx) return null;
+    const byProjectDir = snapshot.projectDir
+      ? this.ctx.resolveSession(snapshot.projectDir)
+      : null;
+    if (byProjectDir) return byProjectDir;
+    return this.ctx.resolveThreadOwner?.("pi", threadId)?.session ?? null;
+  }
+
   private async processFile(filePath: string): Promise<void> {
     if (!this.ctx) return;
 
@@ -211,7 +220,6 @@ export class PiAgentWatcher implements AgentWatcher {
       return;
     }
 
-    const encodedDir = basename(dirname(filePath));
     const threadId = parseThreadId(filePath);
     const prev = this.sessions.get(threadId);
 
@@ -244,10 +252,6 @@ export class PiAgentWatcher implements AgentWatcher {
       });
     }
 
-    if (!nextSnapshot.projectDir) {
-      nextSnapshot.projectDir = encodedDir;
-    }
-
     this.sessions.set(threadId, nextSnapshot);
 
     if (!this.seeded) return;
@@ -255,9 +259,7 @@ export class PiAgentWatcher implements AgentWatcher {
     const prevStatus = prev?.status;
     if (nextSnapshot.status === prevStatus) return;
 
-    const session = nextSnapshot.projectDir
-      ? this.ctx.resolveSession(nextSnapshot.projectDir)
-      : null;
+    const session = this.resolveEventSession(threadId, nextSnapshot);
     if (!session) return;
     if (!prev && nextSnapshot.status === "idle") return;
 
@@ -295,9 +297,9 @@ export class PiAgentWatcher implements AgentWatcher {
         this.seeded = true;
 
         for (const [threadId, snapshot] of this.sessions) {
-          if (snapshot.status === "idle" || !snapshot.projectDir) continue;
+          if (snapshot.status === "idle") continue;
 
-          const session = this.ctx.resolveSession(snapshot.projectDir);
+          const session = this.resolveEventSession(threadId, snapshot);
           if (!session) continue;
 
           this.ctx.emit({
