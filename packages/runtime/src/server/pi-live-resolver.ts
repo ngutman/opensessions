@@ -140,8 +140,11 @@ export class PiLiveResolver {
           pid: match.pid,
         };
         const existing = ownersByThreadId.get(match.sessionId);
-        if (!existing) {
+        if (existing === undefined) {
           ownersByThreadId.set(match.sessionId, owner);
+          continue;
+        }
+        if (existing === null) {
           continue;
         }
         if (

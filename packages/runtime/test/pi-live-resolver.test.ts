@@ -66,6 +66,31 @@ describe("PiLiveResolver", () => {
     expect([...resolver.scanPresenceBySession().entries()]).toEqual([]);
   });
 
+  test("keeps ambiguous thread ownership sticky within a snapshot", () => {
+    const registry = new PiRuntimeRegistry(10_000);
+    const resolver = new PiLiveResolver({
+      listPanes: () => [
+        { session: "opensessions", paneId: "%4", pid: 100 },
+        { session: "CodexBar", paneId: "%7", pid: 300 },
+        { session: "opensessions", paneId: "%9", pid: 500 },
+      ],
+      listSidebarPaneIds: () => [],
+      buildProcessTree: () => buildProcessTree([
+        { pid: 201, ppid: 100, comm: "pi" },
+        { pid: 202, ppid: 300, comm: "pi" },
+        { pid: 203, ppid: 500, comm: "pi" },
+      ]),
+      now: () => 1000,
+    }, registry, 10_000);
+
+    resolver.upsert({ pid: 201, sessionId: "thread-1", cwd: "/tmp/a", ts: 1000 });
+    resolver.upsert({ pid: 202, sessionId: "thread-1", cwd: "/tmp/b", ts: 1000 });
+    resolver.upsert({ pid: 203, sessionId: "thread-1", cwd: "/tmp/c", ts: 1000 });
+
+    expect(resolver.resolveThreadOwner("thread-1")).toBeNull();
+    expect([...resolver.scanPresenceBySession().entries()]).toEqual([]);
+  });
+
   test("canonicalizes cwd-mismatched Pi events to the live pane owner and dedupes tracker state", () => {
     const registry = new PiRuntimeRegistry(10_000);
     const resolver = new PiLiveResolver({
