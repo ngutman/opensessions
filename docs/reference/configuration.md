@@ -93,6 +93,7 @@ The plugin registers these prefix bindings automatically:
 | --- | --- |
 | `prefix o → s` | Reveal and focus the sidebar |
 | `prefix o → t` | Toggle the sidebar |
+| `prefix o → e` | Spread non-sidebar panes in the current window using `even-horizontal` |
 | `prefix o → 1` through `prefix o → 9` | Switch to visible session by index |
 
 Minimal install:
