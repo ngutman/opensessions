@@ -3,11 +3,14 @@ import { join } from "path";
 import { homedir } from "os";
 import type { MuxProvider } from "../contracts/mux";
 import { isFullSidebarCapable, isBatchCapable } from "../contracts/mux";
-import type { AgentEvent } from "../contracts/agent";
-import type { AgentWatcher, AgentWatcherContext } from "../contracts/agent-watcher";
+import type { AgentEvent, PanePresenceInput } from "../contracts/agent";
+import type { AgentThreadOwner, AgentWatcher, AgentWatcherContext } from "../contracts/agent-watcher";
 import { AgentTracker } from "../agents/tracker";
 import { SessionOrder } from "./session-order";
 import { SessionMetadataStore } from "./metadata-store";
+import { canonicalizeAgentEvent } from "./agent-ownership";
+import { PiLiveResolver } from "./pi-live-resolver";
+import { parsePiRuntimeInfo } from "./pi-runtime-registry";
 import { buildLocalLinks, loadPortlessState } from "./portless";
 import {
   areWidthReportsSuppressed,
@@ -340,6 +343,58 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     return map;
   }
 
+  const piLiveResolver = new PiLiveResolver({
+    listPanes: () => {
+      const raw = shell([
+        "tmux", "list-panes", "-a",
+        "-F", "#{session_name}|#{pane_id}|#{pane_pid}",
+      ]);
+      if (!raw) return [];
+      return raw.split("\n")
+        .filter(Boolean)
+        .map((line) => {
+          const idx1 = line.indexOf("|");
+          const idx2 = line.indexOf("|", idx1 + 1);
+          return {
+            session: line.slice(0, idx1),
+            paneId: line.slice(idx1 + 1, idx2),
+            pid: parseInt(line.slice(idx2 + 1), 10),
+          };
+        })
+        .filter((pane) => !Number.isNaN(pane.pid));
+    },
+    listSidebarPaneIds: function* () {
+      for (const { panes } of listSidebarPanesByProvider()) {
+        for (const pane of panes) yield pane.paneId;
+      }
+    },
+    buildProcessTree,
+  });
+
+  function resolveThreadOwner(agent: string, threadId?: string): AgentThreadOwner | null {
+    if (agent === "pi" && threadId) {
+      const owner = piLiveResolver.resolveThreadOwner(threadId);
+      return owner ? { session: owner.session, paneId: owner.paneId } : null;
+    }
+    return null;
+  }
+
+  function canonicalizeOwnedEvent(event: AgentEvent): AgentEvent {
+    const nextEvent = canonicalizeAgentEvent(event, resolveThreadOwner);
+    if (event.session !== nextEvent.session && nextEvent.threadId) {
+      log("agent-emit", "thread owner override", {
+        agent: nextEvent.agent,
+        from: event.session,
+        to: nextEvent.session,
+        threadId: nextEvent.threadId.slice(0, 8),
+      });
+    }
+    if (nextEvent.threadId) {
+      tracker.dedupeInstanceToSession(nextEvent.session, nextEvent.agent, nextEvent.threadId);
+    }
+    return nextEvent;
+  }
+
   const watcherCtx: AgentWatcherContext = {
     resolveSession(projectDir: string): string | null {
       const map = getDirSessionMap();
@@ -361,9 +416,11 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       }
       return null;
     },
+    resolveThreadOwner,
     emit(event: AgentEvent) {
-      log("agent-emit", event.agent, { session: event.session, status: event.status, threadId: event.threadId?.slice(0, 8) });
-      tracker.applyEvent(event, { seed: !watchersSeeded });
+      const nextEvent = canonicalizeOwnedEvent(event);
+      log("agent-emit", nextEvent.agent, { session: nextEvent.session, status: nextEvent.status, threadId: nextEvent.threadId?.slice(0, 8) });
+      tracker.applyEvent(nextEvent, { seed: !watchersSeeded });
       debouncedBroadcast();
     },
   };
@@ -1185,13 +1242,27 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     return undefined;
   }
 
+  function getTrackedAlivePaneId(sessionName: string, agentName: string, threadId?: string): string | undefined {
+    if (!threadId) return undefined;
+    return tracker.getAgents(sessionName)
+      .find((agent) => agent.agent === agentName && agent.threadId === threadId && agent.liveness === "alive" && !!agent.paneId)
+      ?.paneId;
+  }
+
+  function resolvePiPane(threadId: string): string | undefined {
+    return piLiveResolver.resolveThreadPane(threadId, { fresh: true });
+  }
+
   /** Resolve a tmux pane ID for an agent using all available resolution strategies. */
   function resolveAgentPaneId(sessionName: string, agentName: string, threadId?: string, threadName?: string): string | undefined {
+    const trackedPaneId = getTrackedAlivePaneId(sessionName, agentName, threadId);
+    if (trackedPaneId) return trackedPaneId;
+
     const p = sessionProviders.get(sessionName) ?? mux;
     if (p.name !== "tmux") return undefined;
 
     const patterns = AGENT_TITLE_PATTERNS[agentName];
-    if (!patterns) return undefined;
+    if (!patterns && agentName !== "pi") return undefined;
 
     const raw = shell([
       "tmux", "list-panes", "-s", "-t", sessionName,
@@ -1234,12 +1305,18 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     if (!targetPaneId && agentName === "opencode" && threadId) {
       targetPaneId = resolveOpenCodePane(nonSidebar, threadId);
     }
-    if (!targetPaneId) {
+    if (!targetPaneId && agentName === "pi" && threadId) {
+      targetPaneId = resolvePiPane(threadId);
+      if (targetPaneId && sidebarPaneIds.has(targetPaneId)) {
+        targetPaneId = undefined;
+      }
+    }
+    if (!targetPaneId && patterns) {
       targetPaneId = nonSidebar
         .find((p) => patterns.some((pat) => p.title.toLowerCase().includes(pat)))
         ?.id;
     }
-    if (!targetPaneId) {
+    if (!targetPaneId && patterns) {
       for (const pane of nonSidebar) {
         if (matchProcessTree(pane.pid, patterns)) {
           targetPaneId = pane.id;
@@ -1341,12 +1418,11 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     return false;
   }
 
-
   /** Scan all panes across all tmux sessions and identify running agents.
-   *  Returns only {agent, paneId} — no threadId, status, or threadName.
-   *  Watchers are the single source of truth for those fields. */
-  function scanAllTmuxPaneAgents(): Map<string, import("../contracts/agent").PanePresenceInput[]> {
-    const result = new Map<string, import("../contracts/agent").PanePresenceInput[]>();
+   *  Returns pane presence, optionally enriched with threadId when an agent-specific
+   *  runtime registry can resolve a live process to a watcher thread. */
+  function scanAllTmuxPaneAgents(): Map<string, PanePresenceInput[]> {
+    const result = new Map<string, PanePresenceInput[]>();
 
     const raw = shell([
       "tmux", "list-panes", "-a",
@@ -1393,6 +1469,16 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         }
         sessionAgents.push({ agent: agentName, paneId: pane.id });
       }
+
+    }
+
+    for (const [session, paneAgents] of piLiveResolver.scanPresenceBySession()) {
+      let sessionAgents = result.get(session);
+      if (!sessionAgents) {
+        sessionAgents = [];
+        result.set(session, sessionAgents);
+      }
+      sessionAgents.push(...paneAgents);
     }
 
     return result;
@@ -1413,6 +1499,11 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
 
     // Apply presence for sessions that have pane agents
     for (const [session, paneAgents] of nextBySession) {
+      for (const paneAgent of paneAgents) {
+        if (paneAgent.threadId) {
+          if (tracker.dedupeInstanceToSession(session, paneAgent.agent, paneAgent.threadId)) changed = true;
+        }
+      }
       if (tracker.applyPanePresence(session, paneAgents)) changed = true;
     }
 
@@ -1860,6 +1951,34 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
           }
         }
         return new Response("ok", { status: 200 });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/runtime/pi/upsert") {
+        try {
+          const parsed = parsePiRuntimeInfo(await req.json());
+          if (!parsed) {
+            return new Response("invalid pi runtime payload", { status: 400 });
+          }
+          piLiveResolver.upsert(parsed);
+          if (clientCount > 0) refreshPaneAgents();
+          return new Response(null, { status: 204 });
+        } catch {
+          return new Response("invalid json", { status: 400 });
+        }
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/runtime/pi/delete") {
+        try {
+          const body = await req.json() as { pid?: number };
+          if (typeof body.pid !== "number" || !Number.isInteger(body.pid) || body.pid <= 0) {
+            return new Response("missing pid", { status: 400 });
+          }
+          piLiveResolver.delete(body.pid);
+          if (clientCount > 0) refreshPaneAgents();
+          return new Response(null, { status: 204 });
+        } catch {
+          return new Response("invalid json", { status: 400 });
+        }
       }
 
       if (req.method === "POST" && url.pathname === "/set-status") {

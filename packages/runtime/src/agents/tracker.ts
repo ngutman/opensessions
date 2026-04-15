@@ -3,6 +3,7 @@ import { TERMINAL_STATUSES } from "../contracts/agent";
 
 const MAX_EVENT_TIMESTAMPS = 30;
 const TERMINAL_PRUNE_MS = 5 * 60 * 1000;
+const SYNTHETIC_PANE_MARKER = ":pane:";
 
 const STATUS_PRIORITY: Record<string, number> = {
   "tool-running": 7,
@@ -17,6 +18,16 @@ const STATUS_PRIORITY: Record<string, number> = {
 
 export function instanceKey(agent: string, threadId?: string): string {
   return threadId ? `${agent}:${threadId}` : agent;
+}
+
+function syntheticPaneKey(agent: string, paneId: string, threadId?: string): string {
+  return threadId
+    ? `${agent}:${threadId}${SYNTHETIC_PANE_MARKER}${paneId}`
+    : `${agent}${SYNTHETIC_PANE_MARKER}${paneId}`;
+}
+
+function isSyntheticPaneKey(key: string): boolean {
+  return key.includes(SYNTHETIC_PANE_MARKER);
 }
 
 export class AgentTracker {
@@ -48,18 +59,33 @@ export class AgentTracker {
     }
     sessionInstances.set(key, event);
 
-    // Clean up any synthetic pane-keyed entries for this agent
-    // (pane scanner may have created a minimal synthetic before the watcher seeded)
+    // Clean up a matching synthetic pane-keyed entry for this agent.
+    // Prefer exact thread matches. Fall back to a single generic synthetic
+    // only when there is no ambiguity.
+    const exactSyntheticMatches: Array<{ key: string; event: AgentEvent }> = [];
+    const genericSyntheticMatches: Array<{ key: string; event: AgentEvent }> = [];
     for (const [k, ev] of sessionInstances) {
-      if (k !== key && ev.agent === event.agent && k.includes(":pane:")) {
-        // Transfer pane info from the synthetic to the watcher entry
-        if (ev.paneId && !event.paneId) {
-          event.paneId = ev.paneId;
-          event.liveness = ev.liveness;
-        }
-        sessionInstances.delete(k);
-        this.unseenInstances.delete(this.unseenKey(event.session, k));
+      if (k === key || ev.agent !== event.agent || !isSyntheticPaneKey(k)) continue;
+      if (ev.threadId && event.threadId && ev.threadId === event.threadId) {
+        exactSyntheticMatches.push({ key: k, event: ev });
+      } else if (!ev.threadId) {
+        genericSyntheticMatches.push({ key: k, event: ev });
       }
+    }
+
+    const matchToMerge = exactSyntheticMatches.length === 1
+      ? exactSyntheticMatches[0]
+      : exactSyntheticMatches.length === 0 && genericSyntheticMatches.length === 1
+        ? genericSyntheticMatches[0]
+        : undefined;
+
+    if (matchToMerge) {
+      if (matchToMerge.event.paneId && !event.paneId) {
+        event.paneId = matchToMerge.event.paneId;
+        event.liveness = matchToMerge.event.liveness;
+      }
+      sessionInstances.delete(matchToMerge.key);
+      this.unseenInstances.delete(this.unseenKey(event.session, matchToMerge.key));
     }
 
     // Track event timestamps
@@ -151,6 +177,27 @@ export class AgentTracker {
     return true;
   }
 
+  /** Ensure a specific watcher instance only exists in one session.
+   *  Useful when cwd-based watcher resolution and live pane ownership disagree.
+   *  Returns true if any duplicate instances were removed from other sessions. */
+  dedupeInstanceToSession(session: string, agent: string, threadId?: string): boolean {
+    if (!threadId) return false;
+    const key = instanceKey(agent, threadId);
+    let changed = false;
+
+    for (const [otherSession, sessionInstances] of this.instances) {
+      if (otherSession === session) continue;
+      if (!sessionInstances.delete(key)) continue;
+      this.unseenInstances.delete(this.unseenKey(otherSession, key));
+      if (sessionInstances.size === 0) {
+        this.instances.delete(otherSession);
+      }
+      changed = true;
+    }
+
+    return changed;
+  }
+
   pruneStuck(timeoutMs: number): void {
     const now = Date.now();
     for (const [session, sessionInstances] of this.instances) {
@@ -229,12 +276,13 @@ export class AgentTracker {
   }
 
   /** Fold pane scanner results into the tracker.
-   *  The scanner only reports {agent, paneId} — no threadId, status, or threadName.
-   *  Watchers are the single source of truth for those fields.
+   *  The scanner reports {agent, paneId} and may include threadId when it can
+   *  resolve a live process to a specific watcher instance.
    *
    *  1. Entries with liveness "alive" whose paneId is missing from the scan → "exited"
-   *  2. Each pane agent: find existing entry for this agent → stamp paneId + liveness.
-   *     If none exists, create a minimal synthetic (status: "idle", liveness: "alive").
+   *  2. Exact threadId matches enrich the corresponding watcher entry.
+   *  3. If no exact match exists, unambiguous single-instance matches fall back by agent.
+   *  4. Otherwise create or update a synthetic pane-backed idle entry.
    *  Returns true if anything changed (caller uses this for broadcast decisions). */
   applyPanePresence(session: string, paneAgents: PanePresenceInput[]): boolean {
     let changed = false;
@@ -262,28 +310,67 @@ export class AgentTracker {
         this.instances.set(session, sessionInstances);
       }
 
-      // Find an existing entry for this agent (prefer watcher-sourced over synthetic)
-      let bestEvent: AgentEvent | undefined;
-      for (const [k, ev] of sessionInstances) {
-        if (ev.agent !== pa.agent) continue;
-        if (!bestEvent || !k.includes(":pane:")) {
-          bestEvent = ev;
-          // If this is a watcher-sourced entry (not pane-keyed), prefer it and stop
-          if (!k.includes(":pane:")) break;
-        }
-      }
-
-      if (bestEvent) {
-        const wasDifferent = bestEvent.paneId !== pa.paneId || bestEvent.liveness !== "alive";
-        bestEvent.paneId = pa.paneId;
-        bestEvent.liveness = "alive";
+      const stampAlive = (target: AgentEvent) => {
+        const wasDifferent = target.paneId !== pa.paneId || target.liveness !== "alive";
+        target.paneId = pa.paneId;
+        target.liveness = "alive";
         if (wasDifferent) changed = true;
+      };
+
+      if (pa.threadId) {
+        const exactKey = instanceKey(pa.agent, pa.threadId);
+        const exactEvent = sessionInstances.get(exactKey);
+        if (exactEvent) {
+          stampAlive(exactEvent);
+
+          // Drop any synthetic for the same pane now that we have an exact watcher entry.
+          const genericSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId);
+          const exactSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId, pa.threadId);
+          if (sessionInstances.delete(genericSyntheticKey)) {
+            this.unseenInstances.delete(this.unseenKey(session, genericSyntheticKey));
+          }
+          if (sessionInstances.delete(exactSyntheticKey)) {
+            this.unseenInstances.delete(this.unseenKey(session, exactSyntheticKey));
+          }
+          continue;
+        }
+
+        const exactSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId, pa.threadId);
+        const genericSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId);
+        const existing = sessionInstances.get(exactSyntheticKey);
+        if (existing) {
+          stampAlive(existing);
+          continue;
+        }
+
+        if (sessionInstances.delete(genericSyntheticKey)) {
+          this.unseenInstances.delete(this.unseenKey(session, genericSyntheticKey));
+        }
+
+        sessionInstances.set(exactSyntheticKey, {
+          agent: pa.agent,
+          session,
+          status: "idle",
+          ts: Date.now(),
+          threadId: pa.threadId,
+          paneId: pa.paneId,
+          liveness: "alive",
+        });
+        changed = true;
         continue;
       }
 
-      // No existing entry — create minimal synthetic
-      const syntheticKey = `${pa.agent}:pane:${pa.paneId}`;
-      if (!sessionInstances.has(syntheticKey)) {
+      const watcherEntries = [...sessionInstances.entries()]
+        .filter(([k, ev]) => ev.agent === pa.agent && !isSyntheticPaneKey(k));
+
+      if (watcherEntries.length === 1) {
+        stampAlive(watcherEntries[0]![1]);
+        continue;
+      }
+
+      const syntheticKey = syntheticPaneKey(pa.agent, pa.paneId);
+      const existing = sessionInstances.get(syntheticKey);
+      if (!existing) {
         sessionInstances.set(syntheticKey, {
           agent: pa.agent,
           session,
@@ -294,11 +381,7 @@ export class AgentTracker {
         });
         changed = true;
       } else {
-        const existing = sessionInstances.get(syntheticKey)!;
-        const wasDifferent = existing.paneId !== pa.paneId || existing.liveness !== "alive";
-        existing.paneId = pa.paneId;
-        existing.liveness = "alive";
-        if (wasDifferent) changed = true;
+        stampAlive(existing);
       }
     }
 
