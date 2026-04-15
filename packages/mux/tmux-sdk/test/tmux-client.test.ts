@@ -113,6 +113,35 @@ describe("TmuxClient", () => {
     expect(session === null || typeof session === "string").toBe(true);
   });
 
+  test("getCurrentSession() ignores control-mode clients without a tty", () => {
+    class ControlModeAwareClient extends TmuxClient {
+      override run(args: readonly string[]) {
+        if (args[0] === "list-clients") {
+          return {
+            args: ["tmux", ...args],
+            exitCode: 0,
+            stdout: [
+              "client-1\t\t100\talpha\t80\t24",
+              "/dev/ttys004\t/dev/ttys004\t101\tbeta\t160\t40",
+            ].join("\n"),
+            stderr: "",
+            ok: true,
+          };
+        }
+        return {
+          args: ["tmux", ...args],
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          ok: true,
+        };
+      }
+    }
+
+    const custom = new ControlModeAwareClient();
+    expect(custom.getCurrentSession()).toBe("beta");
+  });
+
   test("getClientTty() returns string", () => {
     const tty = client.getClientTty();
     expect(typeof tty).toBe("string");

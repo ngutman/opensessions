@@ -1,7 +1,47 @@
 #!/usr/bin/env sh
 
-PORT="${OPENSESSIONS_PORT:-7391}"
+server_key() {
+  if [ -n "$OPENSESSIONS_SERVER_KEY" ]; then
+    printf '%s\n' "$OPENSESSIONS_SERVER_KEY"
+    return
+  fi
+
+  if [ -z "$TMUX" ]; then
+    return
+  fi
+
+  socket_path="${TMUX%%,*}"
+  [ -n "$socket_path" ] || return
+
+  awk -v input="$socket_path" 'BEGIN {
+    hash = 0
+    for (i = 1; i <= length(input); i++) {
+      hash = (hash + ord(substr(input, i, 1)) * i) % 20000
+    }
+    printf "%d\n", hash
+  }
+  function ord(ch,    chars) {
+    chars = " !\"#$%&\047()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    return index(chars, ch) + 31
+  }'
+}
+
+SERVER_KEY="$(server_key)"
+if [ -n "$OPENSESSIONS_PORT" ]; then
+  PORT="$OPENSESSIONS_PORT"
+elif [ -n "$SERVER_KEY" ]; then
+  PORT=$((17000 + SERVER_KEY))
+else
+  PORT="7391"
+fi
 HOST="${OPENSESSIONS_HOST:-127.0.0.1}"
+if [ -n "$OPENSESSIONS_PID_FILE" ]; then
+  PID_FILE="$OPENSESSIONS_PID_FILE"
+elif [ -n "$SERVER_KEY" ]; then
+  PID_FILE="/tmp/opensessions.${SERVER_KEY}.pid"
+else
+  PID_FILE="/tmp/opensessions.pid"
+fi
 
 PLUGIN_DIR="$(tmux show-environment -g OPENSESSIONS_DIR 2>/dev/null | cut -d= -f2)"
 PLUGIN_DIR="${PLUGIN_DIR:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"

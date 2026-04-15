@@ -381,6 +381,10 @@ export class TmuxClient {
     return parseRows(CLIENT_SPEC, stdout);
   }
 
+  private getInteractiveClients(): ClientInfo[] {
+    return this.listClients().filter((client) => client.tty.length > 0);
+  }
+
   switchClient(target: string, options?: { clientTty?: string }): void {
     const args = ["switch-client"];
     if (options?.clientTty) args.push("-c", options.clientTty);
@@ -412,7 +416,7 @@ export class TmuxClient {
    * Get the current session name from the first attached client
    */
   getCurrentSession(): string | null {
-    const clients = this.listClients();
+    const clients = this.getInteractiveClients();
     if (clients.length === 0) return null;
     return clients[0]!.sessionName || null;
   }

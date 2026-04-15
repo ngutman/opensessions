@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach } from "bun:test";
 import { PluginLoader, type PluginAPI } from "../src/plugins/loader";
 import type { MuxProvider } from "../src/contracts/mux";
 import type { AgentWatcher } from "../src/contracts/agent-watcher";
+import { SERVER_PORT } from "../src/shared";
 import { join } from "path";
 import { mkdirSync, writeFileSync, rmSync } from "fs";
 
@@ -71,7 +72,7 @@ describe("PluginLoader", () => {
     const info = loader.getSetupInfo();
     expect(info.registeredMuxProviders).toContain("tmux");
     expect(typeof info.configPath).toBe("string");
-    expect(info.serverPort).toBe(7391);
+    expect(info.serverPort).toBe(SERVER_PORT);
   });
 
   test("registerWatcher stores and retrieves watchers", () => {

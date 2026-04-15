@@ -21,6 +21,8 @@
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$CURRENT_DIR/integrations/tmux-plugin/scripts"
+SCRIPT_DIR="$SCRIPTS_DIR"
+. "$SCRIPTS_DIR/server-common.sh"
 
 # --- Read user options with defaults ---
 
@@ -60,15 +62,15 @@ tmux set-environment -g OPENSESSIONS_DIR "$CURRENT_DIR"
 tmux set-environment -g OPENSESSIONS_WIDTH "$WIDTH"
 
 # --- Bootstrap: kill stale server if version or install path changed ---
-VERSION_FILE="/tmp/opensessions.version"
+VERSION_FILE="${PID_FILE%.pid}.version"
 CURRENT_VERSION="${CURRENT_DIR}:$(grep -o '"version": *"[^"]*"' "$CURRENT_DIR/package.json" 2>/dev/null | head -1 | cut -d'"' -f4)"
 RUNNING_VERSION=""
 [ -f "$VERSION_FILE" ] && RUNNING_VERSION=$(cat "$VERSION_FILE" 2>/dev/null)
 
 if [ "$CURRENT_VERSION" != "$RUNNING_VERSION" ]; then
-  if [ -f /tmp/opensessions.pid ]; then
-    kill "$(cat /tmp/opensessions.pid)" 2>/dev/null || true
-    rm -f /tmp/opensessions.pid
+  if [ -f "$PID_FILE" ]; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null || true
+    rm -f "$PID_FILE"
   fi
 
   echo -n "$CURRENT_VERSION" > "$VERSION_FILE"

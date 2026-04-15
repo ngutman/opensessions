@@ -2,17 +2,56 @@ import type { AgentStatus, AgentEvent } from "./contracts/agent";
 import type { MuxSessionInfo } from "./contracts/mux";
 import type { SessionFilterMode } from "./config";
 
-export const SERVER_PORT = Number(process.env.OPENSESSIONS_PORT ?? 7391);
-// Bind address for the HTTP server. Override with OPENSESSIONS_HOST to
-// accept POSTs from other hosts (e.g. "0.0.0.0" to listen on all
-// interfaces, or a specific bridge IP such as "10.4.250.1"). Defaults
-// to loopback so out-of-the-box installs stay local-only.
-export const SERVER_HOST = process.env.OPENSESSIONS_HOST ?? "127.0.0.1";
+const DEFAULT_SERVER_PORT = 7391;
+const DEFAULT_SERVER_HOST = "127.0.0.1";
+
+function getTmuxSocketPath(): string | null {
+  const tmux = process.env.TMUX?.trim();
+  if (!tmux) return null;
+  const [socketPath] = tmux.split(",", 1);
+  return socketPath || null;
+}
+
+function hashServerKey(input: string): number {
+  let hash = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = (hash + input.charCodeAt(i) * (i + 1)) % 20000;
+  }
+  return hash;
+}
+
+function resolveServerKey(): string | null {
+  const explicit = process.env.OPENSESSIONS_SERVER_KEY?.trim();
+  if (explicit) return explicit;
+
+  const socketPath = getTmuxSocketPath();
+  if (!socketPath) return null;
+
+  return String(hashServerKey(socketPath));
+}
+
+function resolveServerPort(serverKey: string | null): number {
+  const explicit = Number.parseInt(process.env.OPENSESSIONS_PORT ?? "", 10);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  if (!serverKey) return DEFAULT_SERVER_PORT;
+  return 17000 + Number.parseInt(serverKey, 10);
+}
+
+function resolvePidFile(serverKey: string | null): string {
+  const explicit = process.env.OPENSESSIONS_PID_FILE?.trim();
+  if (explicit) return explicit;
+  if (!serverKey) return "/tmp/opensessions.pid";
+  return `/tmp/opensessions.${serverKey}.pid`;
+}
+
+export const SERVER_KEY = resolveServerKey();
+export const SERVER_PORT = resolveServerPort(SERVER_KEY);
+export const SERVER_HOST = process.env.OPENSESSIONS_HOST?.trim() || DEFAULT_SERVER_HOST;
 // Address that local in-process hooks use to reach the server. Always
 // loopback — remote callers should build their own URL pointing at
 // whichever address SERVER_HOST is bound to.
 export const LOCAL_CLIENT_HOST = "127.0.0.1";
-export const PID_FILE = "/tmp/opensessions.pid";
+export const PID_FILE = resolvePidFile(SERVER_KEY);
 export const SERVER_IDLE_TIMEOUT_MS = 30_000;
 export const STUCK_RUNNING_TIMEOUT_MS = 3 * 60 * 1000;
 
