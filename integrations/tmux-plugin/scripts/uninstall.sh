@@ -51,6 +51,7 @@ tmux unbind-key "$PREFIX_KEY" 2>/dev/null || true
 # Unbind all keys in the opensessions command table
 tmux unbind-key -T opensessions s 2>/dev/null || true
 tmux unbind-key -T opensessions t 2>/dev/null || true
+tmux unbind-key -T opensessions e 2>/dev/null || true
 for i in 1 2 3 4 5 6 7 8 9; do
   tmux unbind-key -T opensessions "$i" 2>/dev/null || true
 done

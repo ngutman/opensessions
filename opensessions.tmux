@@ -10,6 +10,7 @@
 # Default keybindings:
 #   prefix + o → s   — reveal and focus sidebar
 #   prefix + o → t   — toggle sidebar
+#   prefix + o → e   — spread non-sidebar panes even-horizontal in current window
 #   prefix + o → 1-9 — switch to visible session by index
 #
 # Options (set before TPM init):
@@ -81,12 +82,13 @@ fi
 
 # --- Bind tmux shortcuts ---
 
-# Command table for manual use: prefix o → s/t/1-9
+# Command table for manual use: prefix o → s/t/e/1-9
 if [ -n "$PREFIX_KEY" ]; then
   tmux bind-key "$PREFIX_KEY" switch-client -T "$COMMAND_TABLE"
   tmux bind-key -T "$COMMAND_TABLE" Any switch-client -T root
   tmux bind-key -T "$COMMAND_TABLE" s run-shell "sh '$SCRIPTS_DIR/focus.sh'"
   tmux bind-key -T "$COMMAND_TABLE" t run-shell "sh '$SCRIPTS_DIR/toggle.sh'"
+  tmux bind-key -T "$COMMAND_TABLE" e run-shell "sh '$SCRIPTS_DIR/even-horizontal.sh' '#{window_id}' '#{pane_id}'"
   for i in 1 2 3 4 5 6 7 8 9; do
     tmux bind-key -T "$COMMAND_TABLE" "$i" run-shell "sh '$SCRIPTS_DIR/switch-index.sh' $i"
   done

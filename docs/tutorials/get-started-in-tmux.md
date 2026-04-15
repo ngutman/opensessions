@@ -1,6 +1,6 @@
 # Get Started In tmux
 
-This tutorial gets opensessions running as a real tmux sidebar, either through TPM or from a local clone. By the end, you will be able to press `prefix o → s` to open the sidebar, toggle it with `prefix o → t`, switch directly with `prefix o → 1` through `prefix o → 9`, and see agent and Git state update live.
+This tutorial gets opensessions running as a real tmux sidebar, either through TPM or from a local clone. By the end, you will be able to press `prefix o → s` to open the sidebar, toggle it with `prefix o → t`, spread non-sidebar panes with `prefix o → e`, switch directly with `prefix o → 1` through `prefix o → 9`, and see agent and Git state update live.
 
 ## Prerequisites
 
@@ -81,6 +81,7 @@ Recommended shortcut scheme:
 
 - `prefix o → s` reveals and focuses the sidebar pane.
 - `prefix o → t` toggles the sidebar.
+- `prefix o → e` spreads non-sidebar panes in the current window using `even-horizontal`.
 - `prefix o → 1` through `prefix o → 9` switch directly to the visible session indices.
 
 If you use a terminal or window manager setup where no-prefix bindings are safe, you can also set `@opensessions-focus-global-key` and `@opensessions-index-keys`, but they are left unset by default to avoid conflicts.

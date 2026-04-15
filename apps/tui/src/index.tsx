@@ -221,6 +221,7 @@ function getLocalWindowId(): string | null {
 function App() {
   const renderer = useRenderer();
   const startupSessionName = getLocalSessionName();
+  const startupWindowId = getLocalWindowId();
 
   // --- Theme state (driven by server) ---
   const [theme, setTheme] = createSignal<Theme>(resolveTheme(undefined));
@@ -291,6 +292,8 @@ function App() {
   const [clientTty, setClientTty] = createSignal(getClientTty());
   let ws: WebSocket | null = null;
   let startupFocusSynced = false;
+  let lastIdentifiedSessionName: string | null = startupSessionName;
+  let lastIdentifiedWindowId: string | null = startupWindowId;
   let detailResizeStartY = 0;
   let detailResizeStartHeight = DEFAULT_DETAIL_PANEL_HEIGHT;
 
@@ -306,6 +309,11 @@ function App() {
     // Optimistic local update — makes rapid Tab repeat instant by removing
     // the server/hook round-trip from the next-Tab decision.
     // The server's focus/state broadcast will reconcile if needed.
+    // Also update mySession optimistically: after a successful tmux switch,
+    // this sidebar client now belongs to the target session. Without this,
+    // resolveSyncedFocus can snap focus back to the previous local session
+    // during the handoff window before the server replies with your-session.
+    setMySession(name);
     setCurrentSession(name);
     setFocusedSession(name);
     setPanelFocus("sessions");
@@ -315,13 +323,25 @@ function App() {
 
   function reIdentify() {
     const sessionName = getLocalSessionName();
-    if (!sessionName) return;
+    if (!sessionName || sessionName === "_os_stash") return;
     const windowId = getLocalWindowId() ?? undefined;
+
+    lastIdentifiedSessionName = sessionName;
+    lastIdentifiedWindowId = windowId ?? null;
 
     if (muxCtx.type === "tmux") {
       send({ type: "identify-pane", paneId: muxCtx.paneId, sessionName, windowId });
     } else if (muxCtx.type === "zellij") {
       send({ type: "identify-pane", paneId: muxCtx.paneId, sessionName });
+    }
+  }
+
+  function maybeReIdentify() {
+    const sessionName = getLocalSessionName();
+    const windowId = getLocalWindowId();
+    if (!sessionName || sessionName === "_os_stash") return;
+    if (sessionName !== lastIdentifiedSessionName || windowId !== lastIdentifiedWindowId) {
+      reIdentify();
     }
   }
 
@@ -557,9 +577,10 @@ function App() {
         setTerminalWidth(Math.max(0, width));
         if (width !== lastReportedWidth) {
           lastReportedWidth = width;
-          const my = mySession();
+          const liveSession = getLocalSessionName();
           const current = currentSession();
-          if (my && current && my !== current) return;
+          if (!liveSession || liveSession === "_os_stash") return;
+          if (current && liveSession !== current) return;
           send({ type: "report-width", width });
         }
       };
@@ -572,7 +593,10 @@ function App() {
         const msg = JSON.parse(event.data as string) as ServerMessage;
         let startupFocusToPublish: string | null = null;
         batch(() => {
-          const localSessionName = mySession() ?? startupSessionName;
+          const liveLocalSessionName = getLocalSessionName();
+          const localSessionName = liveLocalSessionName && liveLocalSessionName !== "_os_stash"
+            ? liveLocalSessionName
+            : mySession() ?? startupSessionName;
 
           if (msg.type === "state") {
             const startupFocus = !startupFocusSynced
@@ -607,7 +631,8 @@ function App() {
             setInitLabel(msg.initLabel ?? "");
           } else if (msg.type === "focus") {
             if (!initializing()) {
-              setFocusedSession(resolveSyncedFocus(msg.focusedSession, msg.currentSession, localSessionName));
+              const nextFocusedSession = resolveSyncedFocus(msg.focusedSession, msg.currentSession, localSessionName);
+              setFocusedSession(nextFocusedSession);
               setCurrentSession(msg.currentSession);
             }
           } else if (msg.type === "your-session") {
@@ -626,6 +651,8 @@ function App() {
             reIdentify();
           }
         });
+
+        maybeReIdentify();
 
         if (startupFocusToPublish) {
           send({ type: "focus-session", name: startupFocusToPublish });
@@ -877,8 +904,6 @@ function App() {
               theme={theme}
               statusColors={S}
               onSelect={() => {
-                setFocusedSession(session.name);
-                send({ type: "focus-session", name: session.name });
                 switchToSession(session.name);
               }}
             />

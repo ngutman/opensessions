@@ -471,8 +471,13 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     if (!clientTty) return;
     clientTtyBySession.set(sessionName, clientTty);
     for (const ws of connectedClients) {
-      if (clientTtys.get(ws) !== clientTty) continue;
-      if (windowId && clientWindowIds.get(ws) !== windowId) continue;
+      const existingTty = clientTtys.get(ws);
+      const windowMatches = !!windowId && clientWindowIds.get(ws) === windowId;
+      const ttyMatches = existingTty === clientTty;
+      if (!ttyMatches && !windowMatches) continue;
+      if (windowMatches && existingTty !== clientTty) {
+        clientTtys.set(ws, clientTty);
+      }
       sendYourSession(ws, sessionName, clientTty);
     }
   }
@@ -646,11 +651,56 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     broadcastFocusOnly(sender);
   }
 
-  function setFocus(name: string, sender?: any) {
-    if (lastState && lastState.sessions.some((s) => s.name === name)) {
-      focusedSession = name;
-      broadcastFocusOnly(sender);
+  function getForegroundClientTtyForWindow(windowId?: string): string | null {
+    if (!windowId) return null;
+    const raw = shell(["tmux", "list-clients", "-F", "#{client_tty}|#{window_id}"]);
+    if (!raw) return null;
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      const idx = line.indexOf("|");
+      if (idx < 0) continue;
+      const tty = line.slice(0, idx);
+      const clientWindowId = line.slice(idx + 1);
+      if (clientWindowId === windowId) return tty || null;
     }
+    return null;
+  }
+
+  function isForegroundClient(ws: any): boolean {
+    const senderSession = clientSessionNames.get(ws) ?? null;
+    if (senderSession === "_os_stash") return false;
+
+    const senderWindowId = clientWindowIds.get(ws);
+    if (senderWindowId) {
+      const foregroundTty = getForegroundClientTtyForWindow(senderWindowId);
+      if (foregroundTty) return true;
+      return false;
+    }
+
+    const current = getCachedCurrentSession();
+    const currentTty = current ? clientTtyBySession.get(current) ?? null : null;
+    const senderTty = clientTtys.get(ws) ?? null;
+    if (currentTty && senderTty) return currentTty === senderTty;
+
+    if (senderSession && current) return senderSession === current;
+    return true;
+  }
+
+  function setFocus(name: string, sender?: any) {
+    if (!lastState || !lastState.sessions.some((s) => s.name === name)) return;
+
+    if (sender && !isForegroundClient(sender)) {
+      log("focus-session", "ignored from background sidebar", {
+        requested: name,
+        senderSession: clientSessionNames.get(sender) ?? null,
+        senderTty: clientTtys.get(sender) ?? null,
+        current: getCachedCurrentSession(),
+      });
+      return;
+    }
+
+    focusedSession = name;
+    broadcastFocusOnly(sender);
   }
 
   function handleFocus(name: string): void {
@@ -1396,10 +1446,25 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         clientTtys.set(ws, cmd.clientTty);
         break;
       case "switch-session": {
-        // Resolve TTY: hook-derived (authoritative) > client-provided > stored
+        // Resolve TTY from the invoking WebSocket first.
+        // A restored/background sidebar can have a stale clientSessionNames entry,
+        // but its identify() handshake still carries the correct client TTY.
         const clientSess = clientSessionNames.get(ws);
-        const tty = (clientSess ? clientTtyBySession.get(clientSess) : undefined)
-          ?? cmd.clientTty ?? clientTtys.get(ws);
+        const senderWindowId = clientWindowIds.get(ws);
+        const foregroundTtyForWindow = getForegroundClientTtyForWindow(senderWindowId);
+        if (!isForegroundClient(ws)) {
+          log("switch-session", "ignored from background sidebar", {
+            target: cmd.name,
+            senderSession: clientSess ?? null,
+            senderTty: clientTtys.get(ws) ?? null,
+            current: getCachedCurrentSession(),
+          });
+          break;
+        }
+        const tty = foregroundTtyForWindow
+          ?? clientTtys.get(ws)
+          ?? cmd.clientTty
+          ?? (clientSess ? clientTtyBySession.get(clientSess) : undefined);
         log("switch-session", "switching", { target: cmd.name, tty, clientSess });
         const p = sessionProviders.get(cmd.name) ?? mux;
 
@@ -1457,8 +1522,18 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       }
       case "switch-index": {
         const clientSess = clientSessionNames.get(ws);
-        const tty = (clientSess ? clientTtyBySession.get(clientSess) : undefined)
-          ?? clientTtys.get(ws);
+        if (!isForegroundClient(ws)) {
+          log("switch-index", "ignored from background sidebar", {
+            index: cmd.index,
+            senderSession: clientSess ?? null,
+            senderTty: clientTtys.get(ws) ?? null,
+            current: getCachedCurrentSession(),
+          });
+          break;
+        }
+        const tty = getForegroundClientTtyForWindow(clientWindowIds.get(ws))
+          ?? clientTtys.get(ws)
+          ?? (clientSess ? clientTtyBySession.get(clientSess) : undefined);
         switchToVisibleIndex(cmd.index, tty);
         break;
       }
@@ -1527,6 +1602,9 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         break;
       case "identify-pane":
         if (cmd.windowId) clientWindowIds.set(ws, cmd.windowId);
+        // Hidden sidebar panes live in _os_stash temporarily; don't let that
+        // transient session overwrite the client's logical session identity.
+        if (cmd.sessionName === "_os_stash") break;
         // Store this client's session, reply with session + authoritative client TTY
         sendYourSession(ws, cmd.sessionName);
         break;
@@ -1547,14 +1625,17 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         const session = clientSessionNames.get(ws) ?? null;
         const current = getCachedCurrentSession();
 
-        // Only the sidebar in the active session is allowed to author width
-        // changes. Background panes still receive resize events, but treating
+        // Only the foreground sidebar in the active session is allowed to
+        // author width changes. Background panes and temporarily stashed panes
+        // can emit resize events during scripted layout operations; treating
         // those as user intent causes global width ping-pong across sessions.
-        if (!session || !current || session !== current) {
-          log("report-width", "SKIP — not active session", {
+        if (!session || !current || session !== current || !isForegroundClient(ws)) {
+          log("report-width", "SKIP — not active foreground session", {
             reported,
             session,
             current,
+            senderTty: clientTtys.get(ws) ?? null,
+            senderWindowId: clientWindowIds.get(ws) ?? null,
             widthReportsSuppressed: areWidthReportsSuppressed(getSidebarState()),
           });
           break;
@@ -1701,6 +1782,16 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       }
 
       // client-resized hook: terminal window changed size — enforce stored width
+      if (req.method === "POST" && url.pathname === "/suppress-width-reports") {
+        const msParam = Number.parseInt(url.searchParams.get("ms") ?? "", 10);
+        const ms = Number.isFinite(msParam) && msParam > 0
+          ? Math.min(msParam, 10_000)
+          : 2_000;
+        suppressWidthReports(ms);
+        log("http", "POST /suppress-width-reports", { ms });
+        return new Response("ok", { status: 200 });
+      }
+
       if (req.method === "POST" && url.pathname === "/client-resized") {
         log("http", "POST /client-resized", {
           sidebarVisible: isSidebarVisible(),
