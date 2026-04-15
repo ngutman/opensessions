@@ -30,6 +30,7 @@ import {
   type FocusUpdate,
   SERVER_PORT,
   SERVER_HOST,
+  LOCAL_CLIENT_HOST,
   PID_FILE,
   SERVER_IDLE_TIMEOUT_MS,
   STUCK_RUNNING_TIMEOUT_MS,
@@ -2125,7 +2126,10 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
 
   // --- Bootstrap ---
 
-  for (const p of allProviders) p.setupHooks(SERVER_HOST, SERVER_PORT);
+  // Local tmux hooks always curl loopback, regardless of what address
+  // the server binds to. SERVER_HOST may be 0.0.0.0 or a bridge IP to
+  // accept remote POSTs, but in-process hooks should never use that.
+  for (const p of allProviders) p.setupHooks(LOCAL_CLIENT_HOST, SERVER_PORT);
   const sidebarPresence = reconcileSidebarPresence();
   if (sidebarPresence.visible) {
     for (const { provider } of listSidebarPanesByProvider()) {
