@@ -3,7 +3,7 @@ import { join } from "path";
 import { homedir } from "os";
 import type { MuxProvider } from "../contracts/mux";
 import { isFullSidebarCapable, isBatchCapable } from "../contracts/mux";
-import type { AgentEvent, PanePresenceInput } from "../contracts/agent";
+import type { AgentEvent, AgentStatus, PanePresenceInput } from "../contracts/agent";
 import type { AgentThreadOwner, AgentWatcher, AgentWatcherContext } from "../contracts/agent-watcher";
 import { AgentTracker } from "../agents/tracker";
 import { SessionOrder } from "./session-order";
@@ -38,6 +38,10 @@ import {
   SERVER_IDLE_TIMEOUT_MS,
   STUCK_RUNNING_TIMEOUT_MS,
 } from "../shared";
+
+const VALID_AGENT_STATUSES = new Set<AgentStatus>([
+  "idle", "running", "tool-running", "done", "error", "waiting", "interrupted", "stale",
+]);
 
 // --- Debug logger ---
 
@@ -324,16 +328,6 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
 
   // --- Agent watcher context ---
 
-  let watcherBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function debouncedBroadcast() {
-    if (watcherBroadcastTimer) return;
-    watcherBroadcastTimer = setTimeout(() => {
-      watcherBroadcastTimer = null;
-      broadcastState();
-    }, 200);
-  }
-
   // Cache for dir→session resolution (rebuilt per scan cycle)
   let dirSessionCache: Map<string, string> | null = null;
   let dirSessionCacheTs = 0;
@@ -431,7 +425,11 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       const nextEvent = canonicalizeOwnedEvent(event);
       log("agent-emit", nextEvent.agent, { session: nextEvent.session, status: nextEvent.status, threadId: nextEvent.threadId?.slice(0, 8) });
       tracker.applyEvent(nextEvent, { seed: !watchersSeeded });
-      debouncedBroadcast();
+      // Broadcast immediately — broadcastState() is already microtask-coalesced
+      // so bursts within a single tick collapse to one send. The previous 200ms
+      // debounce was adding perceptible latency for push-driven events (plugin
+      // POSTs, DTW WebSocket, Claude Code file watcher).
+      broadcastState();
     },
   };
 
@@ -2249,6 +2247,73 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         }
       }
 
+      if (req.method === "POST" && url.pathname === "/api/agent-event") {
+        try {
+          const body = await req.json() as {
+            agent?: string;
+            status?: string;
+            threadId?: string;
+            threadName?: string;
+            tmuxSession?: string;
+            projectDir?: string;
+            ts?: number;
+          };
+          log("agent-event", "received", {
+            agent: body.agent,
+            status: body.status,
+            threadId: body.threadId?.slice(0, 8),
+            tmuxSession: body.tmuxSession,
+            projectDir: body.projectDir,
+          });
+          if (!body.agent || typeof body.agent !== "string") {
+            return new Response("missing agent", { status: 400 });
+          }
+          if (!body.status || !VALID_AGENT_STATUSES.has(body.status as AgentStatus)) {
+            return new Response("invalid status", { status: 400 });
+          }
+
+          // Resolve session: prefer the mux session name if it's one we know
+          // about, otherwise fall back to projectDir-based resolution.
+          let session: string | null = null;
+          if (body.tmuxSession && typeof body.tmuxSession === "string") {
+            const known = new Set<string>();
+            for (const p of allProviders) {
+              for (const s of p.listSessions()) known.add(s.name);
+            }
+            if (known.has(body.tmuxSession)) session = body.tmuxSession;
+          }
+          if (!session && body.projectDir && typeof body.projectDir === "string") {
+            session = watcherCtx.resolveSession(body.projectDir);
+          }
+          if (!session) {
+            return new Response("could not resolve session", { status: 404 });
+          }
+
+          // Tell the matching watcher that the plugin is driving this thread so
+          // it skips cloud API / WebSocket calls for it. Duck-typed to avoid
+          // leaking watcher internals into the shared interface.
+          if (body.threadId) {
+            for (const w of allWatchers) {
+              if (w.name === body.agent && typeof (w as { markPluginOwned?: (id: string) => void }).markPluginOwned === "function") {
+                (w as { markPluginOwned: (id: string) => void }).markPluginOwned(body.threadId);
+              }
+            }
+          }
+
+          watcherCtx.emit({
+            agent: body.agent,
+            session,
+            status: body.status as AgentEvent["status"],
+            ts: typeof body.ts === "number" ? body.ts : Date.now(),
+            threadId: body.threadId,
+            threadName: body.threadName,
+          });
+          return new Response(null, { status: 204 });
+        } catch {
+          return new Response("invalid json", { status: 400 });
+        }
+      }
+
       if (req.method === "POST" && url.pathname === "/set-status") {
         try {
           const body = await req.json() as { session?: string; text?: string | null; tone?: string };
@@ -2447,10 +2512,16 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
   // Run initial pane scan
   refreshPaneAgents();
 
-  // Start agent watchers after server is ready
+  // Start agent watchers after server is ready. Each watcher is isolated so
+  // a failure in one doesn't block the others (pi, claude-code, etc. shouldn't
+  // depend on the amp watcher booting cleanly).
   for (const w of allWatchers) {
-    w.start(watcherCtx);
-    log("server", `agent watcher started: ${w.name}`);
+    try {
+      w.start(watcherCtx);
+      log("server", `agent watcher started: ${w.name}`);
+    } catch (err) {
+      log("server", `agent watcher failed to start: ${w.name}`, { error: String(err) });
+    }
   }
 
   startIdleTimerIfNeeded("server booted without clients");

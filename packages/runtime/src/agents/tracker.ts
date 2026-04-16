@@ -51,11 +51,16 @@ export class AgentTracker {
       sessionInstances = new Map();
       this.instances.set(event.session, sessionInstances);
     }
-    // Preserve pane info from prior enrichment by applyPanePresence
+    // Preserve pane info from prior enrichment by applyPanePresence, and
+    // preserve a previously-known threadName if the incoming event omits it
+    // (e.g. plugin-driven events that don't carry a title on every POST).
     const prev = sessionInstances.get(key);
     if (prev?.paneId) {
       event.paneId = event.paneId ?? prev.paneId;
       event.liveness = event.liveness ?? prev.liveness;
+    }
+    if (prev?.threadName && !event.threadName) {
+      event.threadName = prev.threadName;
     }
     sessionInstances.set(key, event);
 

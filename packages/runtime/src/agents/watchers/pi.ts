@@ -12,7 +12,7 @@
 import { watch, type FSWatcher } from "fs";
 import { readdir, stat } from "fs/promises";
 import { homedir } from "os";
-import { basename, join } from "path";
+import { basename, dirname, join } from "path";
 import type { AgentStatus } from "../../contracts/agent";
 import type {
   AgentWatcher,

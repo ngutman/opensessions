@@ -10,11 +10,41 @@ interface PiRuntimePayload {
   ts: number;
 }
 
-const DEFAULT_SERVER_URL = "http://127.0.0.1:7391";
+const DEFAULT_SERVER_PORT = 7391;
 const HEARTBEAT_MS = 5_000;
 
+/**
+ * Mirror opensessions `packages/runtime/src/shared.ts` port resolution. The
+ * server port is derived from a hash of the tmux socket path so concurrent
+ * tmux servers on the same machine get independent opensessions servers.
+ */
+function hashServerKey(input: string): number {
+  let hash = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = (hash + input.charCodeAt(i) * (i + 1)) % 20000;
+  }
+  return hash;
+}
+
+function resolveServerPort(): number {
+  const explicit = Number.parseInt(process.env.OPENSESSIONS_PORT ?? "", 10);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+
+  const explicitKey = process.env.OPENSESSIONS_SERVER_KEY?.trim();
+  if (explicitKey) return 17000 + Number.parseInt(explicitKey, 10);
+
+  const tmux = process.env.TMUX?.trim();
+  if (tmux) {
+    const socketPath = tmux.split(",", 1)[0];
+    if (socketPath) return 17000 + hashServerKey(socketPath);
+  }
+  return DEFAULT_SERVER_PORT;
+}
+
 function getServerUrl(): string {
-  return (process.env.OPENSESSIONS_URL ?? DEFAULT_SERVER_URL).replace(/\/+$/, "");
+  const explicit = process.env.OPENSESSIONS_URL;
+  if (explicit) return explicit.replace(/\/+$/, "");
+  return `http://127.0.0.1:${resolveServerPort()}`;
 }
 
 export default function opensessionsRuntime(pi: ExtensionAPI) {

@@ -725,4 +725,53 @@ describe("AmpAgentWatcher", () => {
 
     expect(detailFetched).toBe(false);
   });
+
+  // --- Plugin ownership ---
+
+  test("markPluginOwned skips WebSocket connect for that thread", async () => {
+    mockState.dtwTokens.set("T-plugin", "token-plugin");
+    setThread("T-plugin", { env: mkEnv("/projects/myapp") });
+
+    watcher.markPluginOwned("T-plugin");
+    await startWatcher();
+
+    expect(MockWebSocket.instances.length).toBe(0);
+  });
+
+  test("markPluginOwned tears down an existing WebSocket", async () => {
+    mockState.dtwTokens.set("T-plugin-late", "token-plugin-late");
+    setThread("T-plugin-late", { env: mkEnv("/projects/myapp") });
+
+    await startWatcher();
+    expect(MockWebSocket.instances.length).toBe(1);
+    const ws = MockWebSocket.instances[0]!;
+    expect(ws.closed).toBe(false);
+
+    watcher.markPluginOwned("T-plugin-late");
+    expect(ws.closed).toBe(true);
+  });
+
+  test("markPluginOwned does not block other threads", async () => {
+    mockState.dtwTokens.set("T-plugin", "token-a");
+    mockState.dtwTokens.set("T-other", "token-b");
+    setThread("T-plugin", { env: mkEnv("/projects/myapp") });
+    setThread("T-other", { env: mkEnv("/projects/myapp") });
+
+    watcher.markPluginOwned("T-plugin");
+    await startWatcher();
+
+    expect(MockWebSocket.instances.length).toBe(1);
+    expect(MockWebSocket.instances[0]!.protocols).toEqual(["amp", "token-b"]);
+  });
+
+  test("ownership expires after TTL and watcher resumes WS connect", async () => {
+    mockState.dtwTokens.set("T-expire", "token-expire");
+    setThread("T-expire", { env: mkEnv("/projects/myapp") });
+
+    watcher.markPluginOwned("T-expire", 1); // 1ms TTL
+    await new Promise((r) => setTimeout(r, 10));
+    await startWatcher();
+
+    expect(MockWebSocket.instances.length).toBe(1);
+  });
 });

@@ -118,6 +118,7 @@ const POLL_MS = 10_000;
 const RECENT_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 10_000;
 const WS_RETRY_MS = 5_000;
+const PLUGIN_OWNERSHIP_TTL_MS = 5 * 60 * 1000;
 const USER_AGENT = "opensessions/0.1.0";
 
 /**
@@ -231,6 +232,9 @@ export class AmpAgentWatcher implements AgentWatcher {
   private nonDtwThreads = new Set<string>();
   private wsRetryAfter = new Map<string, number>();
   private requestControllers = new Set<AbortController>();
+  /** threadId → expiresAt. If present, the plugin is feeding us status
+   *  and we should skip all cloud API / WebSocket calls for this thread. */
+  private pluginOwnedThreads = new Map<string, number>();
   private lastPollAt: string | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private ctx: AgentWatcherContext | null = null;
@@ -273,6 +277,7 @@ export class AmpAgentWatcher implements AgentWatcher {
     this.wsConnections.clear();
     this.wsRetryAfter.clear();
     this.nonDtwThreads.clear();
+    this.pluginOwnedThreads.clear();
     this.threads.clear();
     this.lastPollAt = null;
     this.seeded = false;
@@ -291,6 +296,29 @@ export class AmpAgentWatcher implements AgentWatcher {
     if (!this.ctx || !projectDir) return null;
     const session = this.ctx.resolveSession(projectDir);
     return session && session !== "unknown" ? session : null;
+  }
+
+  /**
+   * Called when the opensessions Amp plugin reports an event for this thread.
+   * We suppress all cloud API / DTW WebSocket work for plugin-owned threads
+   * and let the plugin drive status. Ownership auto-expires after the TTL,
+   * so we fall back to polling if the plugin goes silent.
+   */
+  markPluginOwned(threadId: string, ttlMs = PLUGIN_OWNERSHIP_TTL_MS): void {
+    this.pluginOwnedThreads.set(threadId, Date.now() + ttlMs);
+    if (this.wsConnections.has(threadId)) this.disconnectWebSocket(threadId);
+    this.nonDtwThreads.delete(threadId);
+    this.clearRetry(threadId);
+  }
+
+  private isPluginOwned(threadId: string, now = Date.now()): boolean {
+    const expiresAt = this.pluginOwnedThreads.get(threadId);
+    if (expiresAt === undefined) return false;
+    if (now > expiresAt) {
+      this.pluginOwnedThreads.delete(threadId);
+      return false;
+    }
+    return true;
   }
 
   private scheduleRetry(threadId: string, now = Date.now()): void {
@@ -375,6 +403,9 @@ export class AmpAgentWatcher implements AgentWatcher {
         const updatedAt = thread.updatedAt ? new Date(thread.updatedAt).getTime() : 0;
         if (now - updatedAt > RECENT_MS) continue;
 
+        // Plugin is driving this thread — don't touch cloud APIs for it.
+        if (this.isPluginOwned(thread.id, now)) continue;
+
         const projectDir = extractProjectDir(thread);
         const session = this.resolveMuxSession(projectDir);
         if (!session) continue;
@@ -447,6 +478,7 @@ export class AmpAgentWatcher implements AgentWatcher {
 
   private async connectWebSocket(threadId: string, lifecycle = this.lifecycle): Promise<void> {
     if (!this.isActive(lifecycle) || !this.ampUrl || !this.apiKey || !this.workerUrl) return;
+    if (this.isPluginOwned(threadId)) return;
     if (this.wsConnections.has(threadId)) return;
     if (!this.shouldRetry(threadId)) return;
 
@@ -571,6 +603,7 @@ export class AmpAgentWatcher implements AgentWatcher {
     now: number,
     lifecycle = this.lifecycle,
   ): Promise<void> {
+    if (this.isPluginOwned(threadId)) return;
     const detail = await this.fetchThreadDetail(threadId, lifecycle);
     if (!detail) return;
     if (!this.isActive(lifecycle)) return;
