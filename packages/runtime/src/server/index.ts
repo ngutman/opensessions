@@ -12,6 +12,7 @@ import { canonicalizeAgentEvent } from "./agent-ownership";
 import { PiLiveResolver } from "./pi-live-resolver";
 import { parsePiRuntimeInfo } from "./pi-runtime-registry";
 import { getAgentProcessPatterns, matchesAgentProcess } from "./agent-process-match";
+import { dedupeSessionPathCandidates, resolveSessionFromCandidates, type SessionPathCandidate } from "./session-path-resolver";
 import { buildLocalLinks, loadPortlessState } from "./portless";
 import {
   applySidebarWidthReport,
@@ -330,23 +331,57 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
 
   // --- Agent watcher context ---
 
-  // Cache for dir→session resolution (rebuilt per scan cycle)
-  let dirSessionCache: Map<string, string> | null = null;
-  let dirSessionCacheTs = 0;
-  const DIR_CACHE_TTL = 5000;
+  let watcherBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function getDirSessionMap(): Map<string, string> {
+  function debouncedBroadcast() {
+    if (watcherBroadcastTimer) return;
+    watcherBroadcastTimer = setTimeout(() => {
+      watcherBroadcastTimer = null;
+      broadcastState();
+    }, 200);
+  }
+
+  // Cache for session path resolution candidates (rebuilt per scan cycle)
+  let sessionPathCandidatesCache: SessionPathCandidate[] | null = null;
+  let sessionPathCandidatesCacheTs = 0;
+  const SESSION_PATH_CACHE_TTL = 5000;
+
+  function getSessionPathCandidates(): SessionPathCandidate[] {
     const now = Date.now();
-    if (dirSessionCache && now - dirSessionCacheTs < DIR_CACHE_TTL) return dirSessionCache;
-    const map = new Map<string, string>();
+    if (sessionPathCandidatesCache && now - sessionPathCandidatesCacheTs < SESSION_PATH_CACHE_TTL) {
+      return sessionPathCandidatesCache;
+    }
+
+    const candidates: SessionPathCandidate[] = [];
     for (const p of allProviders) {
       for (const s of p.listSessions()) {
-        if (s.dir) map.set(s.dir, s.name);
+        if (s.dir) candidates.push({ session: s.name, path: s.dir });
       }
     }
-    dirSessionCache = map;
-    dirSessionCacheTs = now;
-    return map;
+
+    if (allProviders.some((provider) => provider.name === "tmux")) {
+      const raw = shell([
+        "tmux", "list-panes", "-a",
+        "-F", "#{session_name}|#{pane_title}|#{pane_current_path}",
+      ]);
+      if (raw) {
+        for (const line of raw.split("\n")) {
+          if (!line) continue;
+          const idx1 = line.indexOf("|");
+          const idx2 = line.indexOf("|", idx1 + 1);
+          if (idx1 < 0 || idx2 < 0) continue;
+          const session = line.slice(0, idx1);
+          const title = line.slice(idx1 + 1, idx2);
+          const path = line.slice(idx2 + 1);
+          if (!session || !path || title === "opensessions-sidebar") continue;
+          candidates.push({ session, path });
+        }
+      }
+    }
+
+    sessionPathCandidatesCache = dedupeSessionPathCandidates(candidates);
+    sessionPathCandidatesCacheTs = now;
+    return sessionPathCandidatesCache;
   }
 
   const piLiveResolver = new PiLiveResolver({
@@ -403,24 +438,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
 
   const watcherCtx: AgentWatcherContext = {
     resolveSession(projectDir: string): string | null {
-      const map = getDirSessionMap();
-      // Direct path match
-      const direct = map.get(projectDir);
-      if (direct) return direct;
-      // Substring match (parent/child directories)
-      for (const [dir, name] of map) {
-        if (projectDir.startsWith(dir + "/") || dir.startsWith(projectDir + "/")) return name;
-      }
-      // Encoded match: the watcher couldn't decode the path unambiguously,
-      // so try encoding each session dir and comparing against the encoded form.
-      // Claude Code encodes /, ., and _ as - in project directory names.
-      if (projectDir.startsWith("__encoded__:")) {
-        const encoded = projectDir.slice("__encoded__:".length);
-        for (const [dir, name] of map) {
-          if (dir.replace(/[/._]/g, "-") === encoded) return name;
-        }
-      }
-      return null;
+      return resolveSessionFromCandidates(projectDir, getSessionPathCandidates());
     },
     resolveThreadOwner,
     emit(event: AgentEvent) {
