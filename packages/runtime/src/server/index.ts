@@ -1202,7 +1202,6 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     // Always enforce width — session switches can change window width,
     // causing tmux to proportionally redistribute pane sizes.
     // Call directly (not scheduled) since we're already behind debouncedEnsureSidebar.
-    startProgrammaticAdjustment();
     suppressWidthReports();
     enforceSidebarWidth();
   }
