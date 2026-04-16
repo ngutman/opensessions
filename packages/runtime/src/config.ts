@@ -6,6 +6,19 @@ import type { PartialTheme } from "./themes";
 /** Session filter mode for the TUI sidebar */
 export type SessionFilterMode = "all" | "active" | "running";
 
+export interface AgentDisplayConfig {
+  showContext: boolean;
+  showThreadName: boolean;
+}
+
+export function resolveAgentDisplayConfig(agentDisplay?: Partial<AgentDisplayConfig>): AgentDisplayConfig {
+  return {
+    showContext: true,
+    showThreadName: true,
+    ...(agentDisplay ?? {}),
+  };
+}
+
 export interface OpensessionsConfig {
   /** Explicit mux provider name (overrides auto-detect) */
   mux?: string;
@@ -25,10 +38,17 @@ export interface OpensessionsConfig {
   detailPanelHeights?: Record<string, number>;
   /** Default session filter: "all" (default), "active" (any agent), "running" (running agents only) */
   sessionFilter?: SessionFilterMode;
+  /** Controls which context fields appear in agent rows */
+  agentDisplay?: AgentDisplayConfig;
 }
+
+export type OpensessionsConfigUpdate = Partial<Omit<OpensessionsConfig, "agentDisplay">> & {
+  agentDisplay?: Partial<AgentDisplayConfig>;
+};
 
 const DEFAULTS: OpensessionsConfig = {
   plugins: [],
+  agentDisplay: resolveAgentDisplayConfig(),
 };
 
 /**
@@ -45,11 +65,12 @@ export function loadConfig(homeDir?: string): OpensessionsConfig {
 
   try {
     const raw = readFileSync(configPath, "utf-8");
-    const parsed = JSON.parse(raw) as Partial<OpensessionsConfig>;
+    const parsed = JSON.parse(raw) as OpensessionsConfigUpdate;
     return {
       ...DEFAULTS,
       ...parsed,
       plugins: parsed.plugins ?? DEFAULTS.plugins,
+      agentDisplay: resolveAgentDisplayConfig(parsed.agentDisplay),
     };
   } catch {
     return { ...DEFAULTS };
@@ -62,13 +83,21 @@ export function loadConfig(homeDir?: string): OpensessionsConfig {
  * @param updates — partial config fields to write
  * @param homeDir — override home directory (for testing)
  */
-export function saveConfig(updates: Partial<OpensessionsConfig>, homeDir?: string): void {
+export function saveConfig(updates: OpensessionsConfigUpdate, homeDir?: string): void {
   const home = homeDir ?? process.env.HOME ?? process.env.USERPROFILE ?? "";
   const configDir = join(home, ".config", "opensessions");
   const configPath = join(configDir, "config.json");
 
   const existing = loadConfig(homeDir);
-  const merged = { ...existing, ...updates };
+  const merged: OpensessionsConfig = {
+    ...existing,
+    ...updates,
+    plugins: updates.plugins ?? existing.plugins,
+    agentDisplay: resolveAgentDisplayConfig({
+      ...(existing.agentDisplay ?? {}),
+      ...(updates.agentDisplay ?? {}),
+    }),
+  };
 
   mkdirSync(configDir, { recursive: true });
   writeFileSync(configPath, JSON.stringify(merged, null, 2) + "\n");

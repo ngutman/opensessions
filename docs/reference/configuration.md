@@ -20,7 +20,11 @@ If the file does not exist, opensessions falls back to defaults.
   "plugins": [],
   "theme": "tokyo-night",
   "sidebarWidth": 30,
-  "sidebarPosition": "right"
+  "sidebarPosition": "right",
+  "agentDisplay": {
+    "showContext": true,
+    "showThreadName": true
+  }
 }
 ```
 
@@ -35,6 +39,8 @@ If the file does not exist, opensessions falls back to defaults.
 | `sidebarPosition` | `"left" | "right"` | `"left"` | active | Sidebar placement |
 | `port` | `number` | none | parsed only | Present in the config type, but the current server and TUI still use the fixed `7391` constant |
 | `keybinding` | `string` | none | parsed only | Present in the config type, but keybindings are configured outside this file today |
+| `agentDisplay.showContext` | `boolean` | `true` | active | Show compact cwd and branch inline on the first line of each agent row |
+| `agentDisplay.showThreadName` | `boolean` | `true` | active | Show the watcher-provided thread name on the second line of each agent row |
 
 ## Built-In Themes
 

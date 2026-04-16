@@ -256,7 +256,7 @@ describe("AgentTracker", () => {
       tracker.applyEvent(event({ session: "sess-1", agent: "claude-code", threadId: "abc", status: "running" }));
 
       const changed = tracker.applyPanePresence("sess-1", [
-        { agent: "claude-code", paneId: "%1" },
+        { agent: "claude-code", paneId: "%1", cwd: "/tmp/project" },
       ]);
 
       expect(changed).toBe(true);
@@ -264,13 +264,15 @@ describe("AgentTracker", () => {
       expect(agents.length).toBe(1);
       expect(agents[0]!.paneId).toBe("%1");
       expect(agents[0]!.liveness).toBe("alive");
+      expect(agents[0]!.cwd).toBe("/tmp/project");
+      expect(agents[0]!.isSynthetic).toBe(false);
       // Watcher status preserved — scanner doesn't touch it
       expect(agents[0]!.status).toBe("running");
     });
 
     test("creates minimal synthetic entry for unmatched pane agent", () => {
       const changed = tracker.applyPanePresence("sess-1", [
-        { agent: "claude-code", paneId: "%5" },
+        { agent: "claude-code", paneId: "%5", cwd: "/tmp/project" },
       ]);
 
       expect(changed).toBe(true);
@@ -279,6 +281,8 @@ describe("AgentTracker", () => {
       expect(agents[0]!.agent).toBe("claude-code");
       expect(agents[0]!.paneId).toBe("%5");
       expect(agents[0]!.liveness).toBe("alive");
+      expect(agents[0]!.cwd).toBe("/tmp/project");
+      expect(agents[0]!.isSynthetic).toBe(true);
       expect(agents[0]!.status).toBe("idle"); // default for synthetics
       expect(agents[0]!.threadId).toBeUndefined(); // scanner doesn't resolve threadId
     });
@@ -429,6 +433,45 @@ describe("AgentTracker", () => {
       expect(agents).toHaveLength(3);
       expect(agents.filter((agent) => agent.agent === "pi" && agent.threadId)).toHaveLength(2);
       expect(agents.find((agent) => agent.threadId === undefined)?.paneId).toBe("%21");
+    });
+
+    test("creates a synthetic entry for an extra pane when one watcher entry is already matched", () => {
+      tracker.applyEvent(event({ session: "sess-1", agent: "pi", threadId: "thread-a", status: "running" }));
+
+      const changed = tracker.applyPanePresence("sess-1", [
+        { agent: "pi", paneId: "%31", cwd: "/Users/guti/projects/opensessions" },
+        { agent: "pi", paneId: "%32", cwd: "/Users/guti/projects" },
+      ]);
+
+      expect(changed).toBe(true);
+      const agents = tracker.getAgents("sess-1");
+      expect(agents).toHaveLength(2);
+      expect(agents.find((agent) => agent.threadId === "thread-a")?.paneId).toBe("%31");
+      expect(agents.find((agent) => agent.threadId === "thread-a")?.cwd).toBe("/Users/guti/projects/opensessions");
+      const synthetic = agents.find((agent) => agent.paneId === "%32");
+      expect(synthetic?.threadId).toBeUndefined();
+      expect(synthetic?.liveness).toBe("alive");
+      expect(synthetic?.cwd).toBe("/Users/guti/projects");
+      expect(synthetic?.isSynthetic).toBe(true);
+    });
+
+    test("preserves watcher-to-pane mapping across repeated multi-pane scans", () => {
+      tracker.applyEvent(event({ session: "sess-1", agent: "pi", threadId: "thread-a", status: "running" }));
+      tracker.applyPanePresence("sess-1", [
+        { agent: "pi", paneId: "%31", cwd: "/Users/guti/projects/opensessions" },
+        { agent: "pi", paneId: "%32", cwd: "/Users/guti/projects" },
+      ]);
+
+      const changed = tracker.applyPanePresence("sess-1", [
+        { agent: "pi", paneId: "%32", cwd: "/Users/guti/projects" },
+        { agent: "pi", paneId: "%31", cwd: "/Users/guti/projects/opensessions" },
+      ]);
+
+      expect(changed).toBe(false);
+      const agents = tracker.getAgents("sess-1");
+      expect(agents).toHaveLength(2);
+      expect(agents.find((agent) => agent.threadId === "thread-a")?.paneId).toBe("%31");
+      expect(agents.find((agent) => agent.paneId === "%32")?.threadId).toBeUndefined();
     });
 
     test("cleans up synthetic entry when watcher creates entry for same exact thread", () => {

@@ -8,11 +8,12 @@ Each session row can show:
 
 - Session index for number-key switching
 - Session name
-- Branch name, truncated when needed
+- Directory basename
 - Running spinner or terminal-state marker
 - Focused state highlight
 - Current client session emphasis
 - Unseen accent for `done`, `error`, or `interrupted` states
+- Local port hints when detected
 
 ## Detail Panel
 
@@ -28,6 +29,8 @@ Clicking a detected port opens `http://localhost:<port>`.
 ## Agent Features
 
 - Multiple agent instances per session when a watcher emits `threadId`
+- Optional compact context line: `agent - cwd (branch)`
+- Optional second line for watcher-provided thread names
 - Per-instance unseen tracking
 - Amp thread seen-state integration via Amp's `session.json`
 - Status values: `idle`, `running`, `done`, `error`, `waiting`, `interrupted`
@@ -65,6 +68,8 @@ Clicking a detected port opens `http://localhost:<port>`.
 | `Alt+Up` | Move focused session up in persisted order |
 | `Alt+Down` | Move focused session down in persisted order |
 | `n`, `c` | Create a new session |
+| `v` | Toggle compact agent context line (`cwd (branch)`) |
+| `Shift+v` | Toggle agent thread-name line |
 | `d`, `x` | Open kill-session confirmation for focused session |
 | `t` | Open theme picker |
 | `r` | Refresh state |

@@ -58,6 +58,7 @@ export class AgentTracker {
     if (prev?.paneId) {
       event.paneId = event.paneId ?? prev.paneId;
       event.liveness = event.liveness ?? prev.liveness;
+      event.cwd = event.cwd ?? prev.cwd;
     }
     if (prev?.threadName && !event.threadName) {
       event.threadName = prev.threadName;
@@ -88,6 +89,7 @@ export class AgentTracker {
       if (matchToMerge.event.paneId && !event.paneId) {
         event.paneId = matchToMerge.event.paneId;
         event.liveness = matchToMerge.event.liveness;
+        event.cwd = event.cwd ?? matchToMerge.event.cwd;
       }
       sessionInstances.delete(matchToMerge.key);
       this.unseenInstances.delete(this.unseenKey(event.session, matchToMerge.key));
@@ -144,7 +146,12 @@ export class AgentTracker {
         const isUnseen = this.unseenInstances.has(this.unseenKey(session, key));
         return isUnseen ? { ...event, unseen: true } : event;
       })
-      .sort((a, b) => b.ts - a.ts);
+      .sort((a, b) => {
+        if (!!a.isSynthetic !== !!b.isSynthetic) return Number(a.isSynthetic) - Number(b.isSynthetic);
+        const priorityDiff = (STATUS_PRIORITY[b.status] ?? 0) - (STATUS_PRIORITY[a.status] ?? 0);
+        if (priorityDiff !== 0) return priorityDiff;
+        return b.ts - a.ts;
+      });
   }
 
   /** Returns recent event timestamps for sparkline rendering */
@@ -292,6 +299,7 @@ export class AgentTracker {
   applyPanePresence(session: string, paneAgents: PanePresenceInput[]): boolean {
     let changed = false;
     let sessionInstances = this.instances.get(session);
+    const assignedWatcherKeys = new Set<string>();
 
     // Index incoming pane IDs for fast lookup
     const activePaneIds = new Set<string>();
@@ -315,27 +323,41 @@ export class AgentTracker {
         this.instances.set(session, sessionInstances);
       }
 
-      const stampAlive = (target: AgentEvent) => {
-        const wasDifferent = target.paneId !== pa.paneId || target.liveness !== "alive";
+      const stampAlive = (target: AgentEvent, key?: string) => {
+        const wasDifferent = target.paneId !== pa.paneId
+          || target.liveness !== "alive"
+          || (pa.cwd !== undefined && target.cwd !== pa.cwd)
+          || (key ? target.isSynthetic === true : false);
         target.paneId = pa.paneId;
         target.liveness = "alive";
+        target.cwd = pa.cwd ?? target.cwd;
+        if (key) {
+          assignedWatcherKeys.add(key);
+          target.isSynthetic = false;
+        }
         if (wasDifferent) changed = true;
+      };
+
+      const deleteGenericSyntheticForPane = () => {
+        const genericSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId);
+        if (sessionInstances.delete(genericSyntheticKey)) {
+          this.unseenInstances.delete(this.unseenKey(session, genericSyntheticKey));
+          changed = true;
+        }
       };
 
       if (pa.threadId) {
         const exactKey = instanceKey(pa.agent, pa.threadId);
         const exactEvent = sessionInstances.get(exactKey);
         if (exactEvent) {
-          stampAlive(exactEvent);
+          stampAlive(exactEvent, exactKey);
 
           // Drop any synthetic for the same pane now that we have an exact watcher entry.
-          const genericSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId);
+          deleteGenericSyntheticForPane();
           const exactSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId, pa.threadId);
-          if (sessionInstances.delete(genericSyntheticKey)) {
-            this.unseenInstances.delete(this.unseenKey(session, genericSyntheticKey));
-          }
           if (sessionInstances.delete(exactSyntheticKey)) {
             this.unseenInstances.delete(this.unseenKey(session, exactSyntheticKey));
+            changed = true;
           }
           continue;
         }
@@ -350,6 +372,7 @@ export class AgentTracker {
 
         if (sessionInstances.delete(genericSyntheticKey)) {
           this.unseenInstances.delete(this.unseenKey(session, genericSyntheticKey));
+          changed = true;
         }
 
         sessionInstances.set(exactSyntheticKey, {
@@ -358,6 +381,8 @@ export class AgentTracker {
           status: "idle",
           ts: Date.now(),
           threadId: pa.threadId,
+          cwd: pa.cwd,
+          isSynthetic: true,
           paneId: pa.paneId,
           liveness: "alive",
         });
@@ -367,9 +392,22 @@ export class AgentTracker {
 
       const watcherEntries = [...sessionInstances.entries()]
         .filter(([k, ev]) => ev.agent === pa.agent && !isSyntheticPaneKey(k));
+      const exactPaneMatch = watcherEntries.find(([, ev]) => ev.paneId === pa.paneId);
+      if (exactPaneMatch) {
+        stampAlive(exactPaneMatch[1], exactPaneMatch[0]);
+        deleteGenericSyntheticForPane();
+        continue;
+      }
 
-      if (watcherEntries.length === 1) {
-        stampAlive(watcherEntries[0]![1]);
+      const reusableWatcherEntries = watcherEntries.filter(([k, ev]) => {
+        if (assignedWatcherKeys.has(k)) return false;
+        if (ev.paneId && ev.paneId !== pa.paneId && ev.liveness === "alive") return false;
+        return true;
+      });
+
+      if (reusableWatcherEntries.length === 1) {
+        stampAlive(reusableWatcherEntries[0]![1], reusableWatcherEntries[0]![0]);
+        deleteGenericSyntheticForPane();
         continue;
       }
 
@@ -381,6 +419,8 @@ export class AgentTracker {
           session,
           status: "idle",
           ts: Date.now(),
+          cwd: pa.cwd,
+          isSynthetic: true,
           paneId: pa.paneId,
           liveness: "alive",
         });

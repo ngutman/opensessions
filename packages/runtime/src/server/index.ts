@@ -21,8 +21,8 @@ import {
   isUserDragActive,
   readSidebarCoordinatorState,
 } from "./sidebar-coordinator";
-import { loadConfig, saveConfig } from "../config";
-import type { SessionFilterMode } from "../config";
+import { loadConfig, saveConfig, resolveAgentDisplayConfig } from "../config";
+import type { SessionFilterMode, AgentDisplayConfig } from "../config";
 import {
   clampSidebarWidth,
 } from "./sidebar-width-sync";
@@ -303,6 +303,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
   const config = loadConfig();
   let currentTheme: string | undefined = typeof config.theme === "string" ? config.theme : undefined;
   let currentFilter: SessionFilterMode | undefined = config.sessionFilter;
+  let currentAgentDisplay: AgentDisplayConfig = resolveAgentDisplayConfig(config.agentDisplay);
   const initialSidebarWidth = clampSidebarWidth(config.sidebarWidth ?? 26);
   let sidebarPosition: "left" | "right" = config.sidebarPosition ?? "left";
   const sidebarCoordinator = createSidebarCoordinator({ width: initialSidebarWidth });
@@ -668,6 +669,15 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       const git = getGitInfo(dir);
       const providerPaneCounts = paneCountMaps.get(provider);
       const panes = providerPaneCounts?.get(name) ?? provider.getPaneCount(name);
+      const enrichAgentContext = (agent: AgentEvent | null): AgentEvent | null => {
+        if (!agent) return null;
+        if (!agent.cwd) return { ...agent };
+        const agentGit = getGitInfo(agent.cwd);
+        return {
+          ...agent,
+          ...(agentGit.branch ? { branch: agentGit.branch } : {}),
+        };
+      };
 
       let uptime = "";
       const diff = Math.floor(Date.now() / 1000) - createdAt;
@@ -693,8 +703,8 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         localLinks: buildLocalLinks(getSessionPorts(name), portlessState),
         windows,
         uptime,
-        agentState: tracker.getState(name),
-        agents: tracker.getAgents(name),
+        agentState: enrichAgentContext(tracker.getState(name)),
+        agents: tracker.getAgents(name).map((agent) => enrichAgentContext(agent)!),
         eventTimestamps: tracker.getEventTimestamps(name),
         metadata: metadataStore.get(name),
       };
@@ -717,6 +727,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       currentSession,
       theme: currentTheme,
       sessionFilter: currentFilter,
+      agentDisplay: currentAgentDisplay,
       sidebarWidth: getSidebarWidth(),
       initializing: sidebarState.initializing,
       initLabel: sidebarState.initLabel,
@@ -735,13 +746,17 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     });
   }
 
-  function broadcastStateImmediate() {
+  function computeLatestState(): ServerState {
     invalidateCurrentSessionCache();
     tracker.pruneStuck(STUCK_RUNNING_TIMEOUT_MS);
     tracker.pruneTerminal();
     lastState = computeState();
     syncGitWatchers(lastState.sessions, broadcastState);
-    const msg = JSON.stringify(lastState);
+    return lastState;
+  }
+
+  function broadcastStateImmediate() {
+    const msg = JSON.stringify(computeLatestState());
     server.publish("sidebar", msg);
   }
 
@@ -1458,6 +1473,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     "claude-code": ["claude"],
     codex: ["codex"],
     opencode: ["opencode"],
+    pi: ["pi"],
   };
 
   const PANE_HIGHLIGHT_BORDER = "fg=#fab387,bold";
@@ -1724,7 +1740,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
 
     const raw = shell([
       "tmux", "list-panes", "-a",
-      "-F", "#{session_name}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_title}",
+      "-F", "#{session_name}|#{pane_id}|#{pane_pid}|#{pane_current_path}|#{pane_current_command}|#{pane_title}",
     ]);
     if (!raw) return result;
 
@@ -1733,12 +1749,14 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       const idx2 = line.indexOf("|", idx1 + 1);
       const idx3 = line.indexOf("|", idx2 + 1);
       const idx4 = line.indexOf("|", idx3 + 1);
+      const idx5 = line.indexOf("|", idx4 + 1);
       return {
         session: line.slice(0, idx1),
         id: line.slice(idx1 + 1, idx2),
         pid: parseInt(line.slice(idx2 + 1, idx3), 10),
-        cmd: line.slice(idx3 + 1, idx4),
-        title: line.slice(idx4 + 1),
+        cwd: line.slice(idx3 + 1, idx4),
+        cmd: line.slice(idx4 + 1, idx5),
+        title: line.slice(idx5 + 1),
       };
     });
 
@@ -1765,7 +1783,7 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
           sessionAgents = [];
           result.set(pane.session, sessionAgents);
         }
-        sessionAgents.push({ agent: agentName, paneId: pane.id });
+        sessionAgents.push({ agent: agentName, paneId: pane.id, cwd: pane.cwd });
       }
 
     }
@@ -1783,13 +1801,13 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
   }
 
   /** Refresh pane agent presence by scanning tmux panes and folding results into the tracker. */
-  function refreshPaneAgents(): void {
+  function refreshPaneAgents(options?: { broadcast?: boolean }): boolean {
     const hasTmux = allProviders.some((p) => p.name === "tmux");
     if (!hasTmux) {
       // No tmux provider — mark all previously-alive agents as exited
       // by applying empty presence for each tracked session
       // (applyPanePresence handles the exited transition internally)
-      return;
+      return false;
     }
 
     const nextBySession = scanAllTmuxPaneAgents();
@@ -1814,7 +1832,8 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       }
     }
 
-    if (changed) broadcastState();
+    if (changed && options?.broadcast !== false) broadcastState();
+    return changed;
   }
 
   // --- Pane agent polling (detect agents in current session every 3s) ---
@@ -1988,6 +2007,11 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       case "set-filter":
         currentFilter = cmd.filter;
         saveConfig({ sessionFilter: cmd.filter });
+        broadcastState();
+        break;
+      case "set-agent-display":
+        currentAgentDisplay = resolveAgentDisplayConfig(cmd.agentDisplay);
+        saveConfig({ agentDisplay: currentAgentDisplay });
         broadcastState();
         break;
       case "quit":
@@ -2426,11 +2450,8 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
           clearTimeout(idleTimer);
           idleTimer = null;
         }
-        if (lastState) {
-          ws.send(JSON.stringify(lastState));
-        } else {
-          broadcastState();
-        }
+        refreshPaneAgents({ broadcast: false });
+        ws.send(JSON.stringify(computeLatestState()));
       },
       close(ws) {
         connectedClients.delete(ws);

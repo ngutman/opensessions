@@ -4,6 +4,7 @@ import { createSignal, createEffect, onCleanup, onMount, batch, For, Show, creat
 import { createStore, reconcile } from "solid-js/store";
 import { useKeyboard, useRenderer } from "@opentui/solid";
 import { TextAttributes, type MouseEvent, type InputRenderable, type KeyEvent } from "@opentui/core";
+import { formatAgentContext } from "./agent-display";
 import { resolveSyncedFocus } from "./focus-sync";
 
 import { ensureServer } from "@opensessions/runtime";
@@ -14,11 +15,13 @@ import {
   type Theme,
   type MetadataTone,
   type SessionFilterMode,
+  type AgentDisplayConfig,
   TERMINAL_STATUSES,
   SERVER_PORT,
   SERVER_HOST,
   BUILTIN_THEMES,
   loadConfig,
+  resolveAgentDisplayConfig,
   resolveTheme,
   saveConfig,
 } from "@opensessions/runtime";
@@ -239,6 +242,9 @@ function App() {
   const [isDetailResizeHover, setIsDetailResizeHover] = createSignal(false);
   const [isDetailResizing, setIsDetailResizing] = createSignal(false);
   const detailPanelSessionName = createMemo(() => focusedSession() ?? mySession());
+  const [agentDisplay, setAgentDisplay] = createSignal<AgentDisplayConfig>(
+    resolveAgentDisplayConfig(loadConfig().agentDisplay),
+  );
 
   // --- Session filter (synced from server) ---
   const [sessionFilter, setSessionFilter] = createSignal<SessionFilterMode>("all");
@@ -268,6 +274,29 @@ function App() {
       setFocusedSession(list[0]!.name);
       send({ type: "focus-session", name: list[0]!.name });
     }
+  }
+
+  function updateAgentDisplay(next: AgentDisplayConfig) {
+    setAgentDisplay(next);
+    send({ type: "set-agent-display", agentDisplay: next });
+  }
+
+  function toggleAgentContext() {
+    const next = resolveAgentDisplayConfig({
+      ...agentDisplay(),
+      showContext: !agentDisplay().showContext,
+    });
+    updateAgentDisplay(next);
+    flash(`agent context ${next.showContext ? "on" : "off"}`);
+  }
+
+  function toggleAgentThreadName() {
+    const next = resolveAgentDisplayConfig({
+      ...agentDisplay(),
+      showThreadName: !agentDisplay().showThreadName,
+    });
+    updateAgentDisplay(next);
+    flash(`agent thread ${next.showThreadName ? "on" : "off"}`);
   }
 
   // --- Panel focus: sessions list vs agent detail ---
@@ -627,6 +656,7 @@ function App() {
             setCurrentSession(msg.currentSession);
             setTheme(resolveTheme(msg.theme));
             setSessionFilter(msg.sessionFilter ?? "all");
+            setAgentDisplay(resolveAgentDisplayConfig(msg.agentDisplay));
             setInitializing(msg.initializing ?? false);
             setInitLabel(msg.initLabel ?? "");
           } else if (msg.type === "focus") {
@@ -822,6 +852,10 @@ function App() {
       case "f":
         cycleSessionFilter();
         break;
+      case "v":
+        if (key.shift) toggleAgentThreadName();
+        else toggleAgentContext();
+        break;
       case "d": {
         if (panelFocus() === "agents") {
           dismissFocusedAgent();
@@ -986,6 +1020,7 @@ function App() {
               }}
               isResizeHover={isDetailResizeHover()}
               isResizing={isDetailResizing()}
+              agentDisplay={agentDisplay}
               onResizeStart={beginDetailResize}
               onResizeDrag={handleDetailResizeDrag}
               onResizeEnd={endDetailResize}
@@ -1006,6 +1041,8 @@ function App() {
             <span style={{ fg: P().overlay1 }}>{" focus  "}</span>
             <span style={{ fg: P().overlay0 }}>{"d"}</span>
             <span style={{ fg: P().overlay1 }}>{" dismiss  "}</span>
+            <span style={{ fg: P().overlay0 }}>{"v/V"}</span>
+            <span style={{ fg: P().overlay1 }}>{" agent  "}</span>
             <span style={{ fg: P().overlay0 }}>{"x"}</span>
             <span style={{ fg: P().overlay1 }}>{" kill"}</span>
           </text>
@@ -1019,6 +1056,8 @@ function App() {
             <span style={{ fg: P().overlay1 }}>{" agents  "}</span>
             <span style={{ fg: P().overlay0 }}>{"f"}</span>
             <span style={{ fg: P().overlay1 }}>{" filter  "}</span>
+            <span style={{ fg: P().overlay0 }}>{"v/V"}</span>
+            <span style={{ fg: P().overlay1 }}>{" agent  "}</span>
             <span style={{ fg: P().overlay0 }}>{"d"}</span>
             <span style={{ fg: P().overlay1 }}>{" hide  "}</span>
             <span style={{ fg: P().overlay0 }}>{"x"}</span>
@@ -1258,6 +1297,7 @@ interface DetailPanelProps {
   theme: Accessor<Theme>;
   statusColors: Accessor<Theme["status"]>;
   spinIdx: Accessor<number>;
+  agentDisplay: Accessor<AgentDisplayConfig>;
   focusedAgentIdx: number;
   onDismissAgent: (agent: SessionData["agents"][number]) => void;
   onFocusAgentPane: (agent: SessionData["agents"][number]) => void;
@@ -1341,10 +1381,12 @@ function DetailPanel(props: DetailPanelProps) {
         <For each={agents()}>
           {(agent, i) => (
             <AgentListItem
+              session={props.session}
               agent={agent}
               palette={P}
               statusColors={props.statusColors}
               spinIdx={props.spinIdx}
+              displayConfig={props.agentDisplay}
               isKeyboardFocused={i() === props.focusedAgentIdx}
               onDismiss={() => props.onDismissAgent(agent)}
               onFocusPane={() => props.onFocusAgentPane(agent)}
@@ -1411,10 +1453,12 @@ function DetailPanel(props: DetailPanelProps) {
 }
 
 interface AgentListItemProps {
+  session: SessionData;
   agent: SessionData["agents"][number];
   palette: Accessor<Theme["palette"]>;
   statusColors: Accessor<Theme["status"]>;
   spinIdx: Accessor<number>;
+  displayConfig: Accessor<AgentDisplayConfig>;
   isKeyboardFocused: boolean;
   onDismiss: () => void;
   onFocusPane: () => void;
@@ -1474,6 +1518,14 @@ function AgentListItem(props: AgentListItemProps) {
     return "transparent";
   };
 
+  const contextText = () => formatAgentContext(props.agent, props.session, props.displayConfig());
+
+  const secondaryText = () => {
+    if (props.displayConfig().showThreadName && props.agent.threadName) return props.agent.threadName;
+    if (props.agent.isSynthetic && props.agent.paneId) return `pane ${props.agent.paneId}`;
+    return "";
+  };
+
   return (
     <box flexDirection="column" flexShrink={0} onMouseDown={(event) => {
       // Don't trigger focus if clicking the dismiss button
@@ -1491,11 +1543,14 @@ function AgentListItem(props: AgentListItemProps) {
       >
         {/* Content column — name row + thread name row */}
         <box flexDirection="column" flexGrow={1} paddingRight={1}>
-          {/* Row 1: icon + agent name + status + dismiss */}
+          {/* Row 1: icon + agent name + cwd/branch + status + dismiss */}
           <box flexDirection="row">
             <text flexGrow={1} truncate>
               <span style={{ fg: color() }}>{icon()}</span>
               <span style={{ fg: props.isKeyboardFocused ? P().text : P().subtext1, attributes: props.isKeyboardFocused ? BOLD : undefined }}>{" "}{props.agent.agent}</span>
+              <Show when={contextText()}>
+                <span style={{ fg: props.isKeyboardFocused ? P().subtext0 : P().overlay0 }}>{" - "}{contextText()}</span>
+              </Show>
             </text>
             <Show when={!isTerminal() || !isUnseen()}>
               <text flexShrink={0}>
@@ -1516,10 +1571,12 @@ function AgentListItem(props: AgentListItemProps) {
             </text>
           </box>
 
-          {/* Row 2: thread name */}
-          <Show when={props.agent.threadName}>
+          {/* Row 2: thread name / synthetic pane label */}
+          <Show when={secondaryText()}>
             <text truncate>
-              <span style={{ fg: isUnseen() ? color() : P().overlay0 }}>{props.agent.threadName}</span>
+              <span style={{ fg: props.agent.threadName ? (isUnseen() ? color() : P().overlay0) : P().overlay1 }}>
+                {secondaryText()}
+              </span>
             </text>
           </Show>
         </box>
@@ -1601,8 +1658,6 @@ function SessionCard(props: SessionCardProps) {
   };
 
   const truncName = () => props.session.name;
-
-  const truncBranch = () => props.session.branch ?? "";
 
   const dirName = () => {
     const d = props.session.dir;
@@ -1690,17 +1745,12 @@ function SessionCard(props: SessionCardProps) {
             </text>
           </Show>
 
-          {/* Row 3: branch + port hint */}
-          <Show when={props.session.branch || portHint()}>
-            <text truncate wrapMode="none" fg={props.isFocused ? P().pink : P().overlay0}>
-              <span style={{ fg: props.isFocused ? P().pink : P().overlay0 }}>
-                {truncBranch()}
+          {/* Row 3: port hint */}
+          <Show when={portHint()}>
+            <text truncate wrapMode="none" fg={props.isFocused ? P().sky : P().overlay0}>
+              <span style={{ fg: props.isFocused ? P().sky : P().overlay0 }}>
+                {portHint()}
               </span>
-              <Show when={portHint()}>
-                <span style={{ fg: props.isFocused ? P().sky : P().overlay0 }}>
-                  {portHint()}
-                </span>
-              </Show>
             </text>
           </Show>
 

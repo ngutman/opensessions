@@ -60,4 +60,17 @@ describe("saveConfig", () => {
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
+
+  test("merges nested agent display settings across saves", () => {
+    const tmpDir = `/tmp/opensessions-test-save-${Date.now()}`;
+
+    saveConfig({ agentDisplay: { showContext: false, showThreadName: true } }, tmpDir);
+    saveConfig({ agentDisplay: { showThreadName: false } }, tmpDir);
+
+    const config = loadConfig(tmpDir);
+
+    expect(config.agentDisplay).toEqual({ showContext: false, showThreadName: false });
+
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
 });

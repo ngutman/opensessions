@@ -1,6 +1,6 @@
 import type { AgentStatus, AgentEvent } from "./contracts/agent";
 import type { MuxSessionInfo } from "./contracts/mux";
-import type { SessionFilterMode } from "./config";
+import type { SessionFilterMode, AgentDisplayConfig } from "./config";
 
 const DEFAULT_SERVER_PORT = 7391;
 const DEFAULT_SERVER_HOST = "127.0.0.1";
@@ -88,6 +88,7 @@ export interface ServerState {
   currentSession: string | null;
   theme: string | undefined;
   sessionFilter: SessionFilterMode | undefined;
+  agentDisplay: AgentDisplayConfig;
   sidebarWidth: number;
   initializing: boolean;
   initLabel?: string;
@@ -167,6 +168,7 @@ export type ClientCommand =
   | { type: "dismiss-agent"; session: string; agent: string; threadId?: string }
   | { type: "set-theme"; theme: string }
   | { type: "set-filter"; filter: SessionFilterMode }
+  | { type: "set-agent-display"; agentDisplay: AgentDisplayConfig }
   | { type: "identify"; clientTty: string }
   | { type: "quit" }
   | { type: "identify-pane"; paneId: string; sessionName: string; windowId?: string }

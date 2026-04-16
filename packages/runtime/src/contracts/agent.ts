@@ -11,6 +11,12 @@ export interface AgentEvent {
   ts: number;
   threadId?: string;
   threadName?: string;
+  /** Best-known cwd for this agent instance, preferably from the live pane */
+  cwd?: string;
+  /** Git branch resolved for cwd when available */
+  branch?: string;
+  /** True when the row was synthesized from live pane presence rather than a watcher event */
+  isSynthetic?: boolean;
   /** Set by tracker when serializing for the TUI — true if user hasn't seen this terminal state */
   unseen?: boolean;
   /** Set by pane scanner — the tmux pane ID where this agent was detected */
@@ -29,4 +35,5 @@ export interface PanePresenceInput {
   agent: string;
   paneId: string;
   threadId?: string;
+  cwd?: string;
 }

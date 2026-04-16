@@ -19,6 +19,7 @@ describe("set-theme command", () => {
       focusedSession: null,
       currentSession: null,
       theme: "dracula",
+      agentDisplay: { showContext: true, showThreadName: true },
       ts: Date.now(),
     };
     expect(state.theme).toBe("dracula");

@@ -10,6 +10,7 @@ describe("Config", () => {
     expect(config.port).toBeUndefined();
     expect(config.plugins).toEqual([]);
     expect(config.theme).toBeUndefined();
+    expect(config.agentDisplay).toEqual({ showContext: true, showThreadName: true });
   });
 
   test("loadConfig reads sidebar settings", async () => {
@@ -34,6 +35,21 @@ describe("Config", () => {
     expect(config.sidebarWidth).toBeUndefined();
     expect(config.sidebarPosition).toBeUndefined();
     expect(config.keybinding).toBeUndefined();
+  });
+
+  test("loadConfig reads agent display settings with defaults", async () => {
+    const tmpDir = `/tmp/opensessions-test-${Date.now()}`;
+    const configDir = join(tmpDir, ".config", "opensessions");
+    await Bun.write(
+      join(configDir, "config.json"),
+      JSON.stringify({ agentDisplay: { showContext: false } }),
+    );
+
+    const config = loadConfig(tmpDir);
+    expect(config.agentDisplay).toEqual({ showContext: false, showThreadName: true });
+
+    const { rmSync } = require("fs");
+    rmSync(tmpDir, { recursive: true, force: true });
   });
 
   test("loadConfig reads from config file", async () => {
