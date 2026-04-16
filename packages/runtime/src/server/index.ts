@@ -11,6 +11,7 @@ import { SessionMetadataStore } from "./metadata-store";
 import { canonicalizeAgentEvent } from "./agent-ownership";
 import { PiLiveResolver } from "./pi-live-resolver";
 import { parsePiRuntimeInfo } from "./pi-runtime-registry";
+import { getAgentProcessPatterns, matchesAgentProcess } from "./agent-process-match";
 import { buildLocalLinks, loadPortlessState } from "./portless";
 import {
   applySidebarWidthReport,
@@ -1453,8 +1454,8 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
 
   // --- Focus agent pane (click-to-focus from TUI) ---
 
-  /** Walk up to 3 levels of child processes looking for a command matching any pattern */
-  function matchProcessTree(pid: string, patterns: string[], depth = 0): boolean {
+  /** Walk up to 3 levels of child processes looking for a matching agent command. */
+  function matchProcessTree(pid: string, agentName: string, depth = 0): boolean {
     if (depth > 2) return false;
     const children = shell(["pgrep", "-P", pid]);
     if (!children) return false;
@@ -1462,19 +1463,11 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       const trimmed = childPid.trim();
       if (!trimmed) continue;
       const childCmd = shell(["ps", "-p", trimmed, "-o", "comm="]);
-      if (childCmd && patterns.some((pat) => commMatches(childCmd.toLowerCase(), pat))) return true;
-      if (matchProcessTree(trimmed, patterns, depth + 1)) return true;
+      if (childCmd && matchesAgentProcess(agentName, childCmd)) return true;
+      if (matchProcessTree(trimmed, agentName, depth + 1)) return true;
     }
     return false;
   }
-
-  const AGENT_TITLE_PATTERNS: Record<string, string[]> = {
-    amp: ["amp"],
-    "claude-code": ["claude"],
-    codex: ["codex"],
-    opencode: ["opencode"],
-    pi: ["pi"],
-  };
 
   const PANE_HIGHLIGHT_BORDER = "fg=#fab387,bold";
   const PANE_HIGHLIGHT_MS = 300;
@@ -1575,8 +1568,8 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     const p = sessionProviders.get(sessionName) ?? mux;
     if (p.name !== "tmux") return undefined;
 
-    const patterns = AGENT_TITLE_PATTERNS[agentName];
-    if (!patterns && agentName !== "pi") return undefined;
+    const patterns = getAgentProcessPatterns(agentName);
+    if (patterns.length === 0 && agentName !== "pi") return undefined;
 
     const raw = shell([
       "tmux", "list-panes", "-s", "-t", sessionName,
@@ -1625,14 +1618,14 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         targetPaneId = undefined;
       }
     }
-    if (!targetPaneId && patterns) {
+    if (!targetPaneId && patterns.length > 0) {
       targetPaneId = nonSidebar
         .find((p) => patterns.some((pat) => p.title.toLowerCase().includes(pat)))
         ?.id;
     }
-    if (!targetPaneId && patterns) {
+    if (!targetPaneId) {
       for (const pane of nonSidebar) {
-        if (matchProcessTree(pane.pid, patterns)) {
+        if (matchProcessTree(pane.pid, agentName)) {
           targetPaneId = pane.id;
           break;
         }
@@ -1704,30 +1697,20 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     return { childrenOf, commOf };
   }
 
-  /** Match a comm string against a pattern as a whole word.
-   *  "claude" matches "claude", "/usr/bin/claude", "claude-code"
-   *  but NOT "tail-claude" or "my-claude-fork". The pattern must appear
-   *  at the start of the comm or after a path separator (/). */
-  function commMatches(comm: string, pat: string): boolean {
-    const idx = comm.indexOf(pat);
-    if (idx < 0) return false;
-    // Pattern must be at start, or preceded by a path separator
-    if (idx > 0 && comm[idx - 1] !== "/") return false;
-    return true;
-  }
-
   /** Walk up to 3 levels of child processes using a pre-built process tree. */
   function matchProcessTreeFast(
-    pid: number, patterns: string[],
-    tree: ReturnType<typeof buildProcessTree>, depth = 0,
+    pid: number,
+    agentName: string,
+    tree: ReturnType<typeof buildProcessTree>,
+    depth = 0,
   ): boolean {
     if (depth > 2) return false;
     const children = tree.childrenOf.get(pid);
     if (!children) return false;
     for (const childPid of children) {
       const comm = tree.commOf.get(childPid);
-      if (comm && patterns.some((pat) => commMatches(comm, pat))) return true;
-      if (matchProcessTreeFast(childPid, patterns, tree, depth + 1)) return true;
+      if (comm && matchesAgentProcess(agentName, comm)) return true;
+      if (matchProcessTreeFast(childPid, agentName, tree, depth + 1)) return true;
     }
     return false;
   }
@@ -1773,10 +1756,10 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
     const tree = buildProcessTree();
 
     for (const pane of nonSidebar) {
-      for (const [agentName, patterns] of Object.entries(AGENT_TITLE_PATTERNS)) {
+      for (const agentName of ["amp", "claude-code", "codex", "opencode", "pi"]) {
         // Only use process tree matching — title matching produces false positives
         // (e.g. an Amp thread named "Detect Claude session names" matches "claude")
-        if (!matchProcessTreeFast(pane.pid, patterns, tree)) continue;
+        if (!matchProcessTreeFast(pane.pid, agentName, tree)) continue;
 
         let sessionAgents = result.get(pane.session);
         if (!sessionAgents) {

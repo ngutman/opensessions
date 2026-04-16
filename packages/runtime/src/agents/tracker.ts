@@ -303,7 +303,14 @@ export class AgentTracker {
 
     // Index incoming pane IDs for fast lookup
     const activePaneIds = new Set<string>();
-    for (const pa of paneAgents) activePaneIds.add(pa.paneId);
+    const paneIdsWithExactThread = new Set<string>();
+    const paneCwdsByAgentAndPane = new Map<string, string>();
+    for (const pa of paneAgents) {
+      const paneKey = `${pa.agent}\0${pa.paneId}`;
+      activePaneIds.add(pa.paneId);
+      if (pa.threadId) paneIdsWithExactThread.add(paneKey);
+      else if (pa.cwd) paneCwdsByAgentAndPane.set(paneKey, pa.cwd);
+    }
 
     // 1. Transition previously-alive entries whose pane disappeared → "exited"
     if (sessionInstances) {
@@ -338,23 +345,38 @@ export class AgentTracker {
         if (wasDifferent) changed = true;
       };
 
+      const getGenericSyntheticForPane = (): { key: string; event: AgentEvent } | null => {
+        const key = syntheticPaneKey(pa.agent, pa.paneId);
+        const event = sessionInstances.get(key);
+        if (!event) return null;
+        return { key, event };
+      };
+
       const deleteGenericSyntheticForPane = () => {
-        const genericSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId);
-        if (sessionInstances.delete(genericSyntheticKey)) {
-          this.unseenInstances.delete(this.unseenKey(session, genericSyntheticKey));
-          changed = true;
-        }
+        const existingGeneric = getGenericSyntheticForPane();
+        if (!existingGeneric) return null;
+        sessionInstances.delete(existingGeneric.key);
+        this.unseenInstances.delete(this.unseenKey(session, existingGeneric.key));
+        changed = true;
+        return existingGeneric.event;
       };
 
       if (pa.threadId) {
+        const paneKey = `${pa.agent}\0${pa.paneId}`;
+        const carriedPaneCwd = pa.cwd ?? paneCwdsByAgentAndPane.get(paneKey);
         const exactKey = instanceKey(pa.agent, pa.threadId);
+        const exactSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId, pa.threadId);
+        const genericSynthetic = getGenericSyntheticForPane();
         const exactEvent = sessionInstances.get(exactKey);
         if (exactEvent) {
+          if (!exactEvent.cwd && (genericSynthetic?.event.cwd || carriedPaneCwd)) {
+            exactEvent.cwd = genericSynthetic?.event.cwd ?? carriedPaneCwd;
+            changed = true;
+          }
           stampAlive(exactEvent, exactKey);
 
           // Drop any synthetic for the same pane now that we have an exact watcher entry.
           deleteGenericSyntheticForPane();
-          const exactSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId, pa.threadId);
           if (sessionInstances.delete(exactSyntheticKey)) {
             this.unseenInstances.delete(this.unseenKey(session, exactSyntheticKey));
             changed = true;
@@ -362,18 +384,18 @@ export class AgentTracker {
           continue;
         }
 
-        const exactSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId, pa.threadId);
-        const genericSyntheticKey = syntheticPaneKey(pa.agent, pa.paneId);
         const existing = sessionInstances.get(exactSyntheticKey);
         if (existing) {
+          if (!existing.cwd && (genericSynthetic?.event.cwd || carriedPaneCwd)) {
+            existing.cwd = genericSynthetic?.event.cwd ?? carriedPaneCwd;
+            changed = true;
+          }
           stampAlive(existing);
+          deleteGenericSyntheticForPane();
           continue;
         }
 
-        if (sessionInstances.delete(genericSyntheticKey)) {
-          this.unseenInstances.delete(this.unseenKey(session, genericSyntheticKey));
-          changed = true;
-        }
+        const genericCwd = deleteGenericSyntheticForPane()?.cwd;
 
         sessionInstances.set(exactSyntheticKey, {
           agent: pa.agent,
@@ -381,12 +403,16 @@ export class AgentTracker {
           status: "idle",
           ts: Date.now(),
           threadId: pa.threadId,
-          cwd: pa.cwd,
+          cwd: carriedPaneCwd ?? genericCwd,
           isSynthetic: true,
           paneId: pa.paneId,
           liveness: "alive",
         });
         changed = true;
+        continue;
+      }
+
+      if (paneIdsWithExactThread.has(`${pa.agent}\0${pa.paneId}`)) {
         continue;
       }
 

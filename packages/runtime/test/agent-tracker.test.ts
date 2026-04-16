@@ -474,6 +474,45 @@ describe("AgentTracker", () => {
       expect(agents.find((agent) => agent.paneId === "%32")?.threadId).toBeUndefined();
     });
 
+    test("promotes generic pane hits to exact thread hits without duplicating the pane", () => {
+      const changed = tracker.applyPanePresence("sess-1", [
+        { agent: "pi", paneId: "%41", cwd: "/Users/guti/projects/opensessions" },
+        { agent: "pi", paneId: "%41", threadId: "thread-a" },
+      ]);
+
+      expect(changed).toBe(true);
+      const agents = tracker.getAgents("sess-1");
+      expect(agents).toHaveLength(1);
+      expect(agents[0]).toMatchObject({
+        agent: "pi",
+        threadId: "thread-a",
+        paneId: "%41",
+        cwd: "/Users/guti/projects/opensessions",
+        isSynthetic: true,
+      });
+    });
+
+    test("repeated generic and exact pane hits keep a single exact row and preserve cwd", () => {
+      tracker.applyPanePresence("sess-1", [
+        { agent: "pi", paneId: "%41", cwd: "/Users/guti/projects/opensessions" },
+        { agent: "pi", paneId: "%41", threadId: "thread-a" },
+      ]);
+
+      const changed = tracker.applyPanePresence("sess-1", [
+        { agent: "pi", paneId: "%41", cwd: "/Users/guti/projects/opensessions" },
+        { agent: "pi", paneId: "%41", threadId: "thread-a" },
+      ]);
+
+      expect(changed).toBe(false);
+      const agents = tracker.getAgents("sess-1");
+      expect(agents).toHaveLength(1);
+      expect(agents[0]).toMatchObject({
+        threadId: "thread-a",
+        paneId: "%41",
+        cwd: "/Users/guti/projects/opensessions",
+      });
+    });
+
     test("cleans up synthetic entry when watcher creates entry for same exact thread", () => {
       tracker.applyPanePresence("sess-1", [
         { agent: "pi", paneId: "%21", threadId: "abc" },
