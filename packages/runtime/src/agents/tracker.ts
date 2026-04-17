@@ -86,9 +86,9 @@ export class AgentTracker {
         : undefined;
 
     if (matchToMerge) {
-      if (matchToMerge.event.paneId && !event.paneId) {
-        event.paneId = matchToMerge.event.paneId;
-        event.liveness = matchToMerge.event.liveness;
+      if (matchToMerge.event.paneId) {
+        event.paneId = event.paneId ?? matchToMerge.event.paneId;
+        event.liveness = event.liveness ?? matchToMerge.event.liveness;
         event.cwd = event.cwd ?? matchToMerge.event.cwd;
       }
       sessionInstances.delete(matchToMerge.key);

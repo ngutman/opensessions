@@ -529,5 +529,30 @@ describe("AgentTracker", () => {
       expect(agents[0]!.paneId).toBe("%21");
       expect(agents[0]!.liveness).toBe("alive");
     });
+
+    test("preserves pane metadata when an exact watcher event already carries paneId", () => {
+      tracker.applyPanePresence("sess-1", [
+        { agent: "pi", paneId: "%21", threadId: "abc", cwd: "/tmp/project" },
+      ]);
+
+      tracker.applyEvent(event({
+        session: "sess-1",
+        agent: "pi",
+        threadId: "abc",
+        status: "running",
+        paneId: "%21",
+      }));
+
+      const agents = tracker.getAgents("sess-1");
+      expect(agents).toHaveLength(1);
+      expect(agents[0]).toMatchObject({
+        agent: "pi",
+        threadId: "abc",
+        paneId: "%21",
+        cwd: "/tmp/project",
+        liveness: "alive",
+      });
+      expect(agents[0]!.isSynthetic).not.toBe(true);
+    });
   });
 });

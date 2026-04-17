@@ -262,11 +262,22 @@ function onGitHeadChange(broadcastFn: () => void) {
   }, 200);
 }
 
-function syncGitWatchers(sessions: SessionData[], broadcastFn: () => void) {
+export function collectGitWatchDirs(
+  sessions: readonly Pick<SessionData, "dir" | "agentState" | "agents">[],
+): Set<string> {
   const currentDirs = new Set<string>();
-  for (const s of sessions) {
-    if (s.dir) currentDirs.add(s.dir);
+  for (const session of sessions) {
+    if (session.dir) currentDirs.add(session.dir);
+    if (session.agentState?.cwd) currentDirs.add(session.agentState.cwd);
+    for (const agent of session.agents) {
+      if (agent.cwd) currentDirs.add(agent.cwd);
+    }
   }
+  return currentDirs;
+}
+
+function syncGitWatchers(sessions: SessionData[], broadcastFn: () => void) {
+  const currentDirs = collectGitWatchDirs(sessions);
 
   for (const [dir, watcher] of gitHeadWatchers) {
     if (!currentDirs.has(dir)) {

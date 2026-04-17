@@ -4,8 +4,8 @@ import { resolveAgentDisplayConfig } from "@opensessions/runtime";
 import { compactDirPath, formatAgentContext } from "./agent-display";
 
 describe("agent display helpers", () => {
-  test("compacts paths under the home directory", () => {
-    expect(compactDirPath("/Users/guti/projects/opensessions", "/Users/guti")).toBe("~/projects/opensessions");
+  test("shows only the current directory name", () => {
+    expect(compactDirPath("/Users/guti/projects/opensessions", "/Users/guti")).toBe("opensessions");
   });
 
   test("formats cwd and branch together", () => {
@@ -16,7 +16,7 @@ describe("agent display helpers", () => {
         resolveAgentDisplayConfig(),
         "/Users/guti",
       ),
-    ).toBe("~/projects/opensessions (main)");
+    ).toBe("opensessions (main)");
   });
 
   test("formats cwd without branch", () => {
@@ -27,7 +27,7 @@ describe("agent display helpers", () => {
         resolveAgentDisplayConfig(),
         "/Users/guti",
       ),
-    ).toBe("/tmp/project");
+    ).toBe("project");
   });
 
   test("formats branch without cwd", () => {
@@ -60,6 +60,10 @@ describe("agent display helpers", () => {
         resolveAgentDisplayConfig(),
         "/Users/guti",
       ),
-    ).toBe("~/projects");
+    ).toBe("projects");
+  });
+
+  test("shows home as tilde", () => {
+    expect(compactDirPath("/Users/guti", "/Users/guti")).toBe("~");
   });
 });

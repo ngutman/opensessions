@@ -2,9 +2,12 @@ import type { AgentDisplayConfig, AgentEvent, SessionData } from "@opensessions/
 
 export function compactDirPath(dir: string, homeDir = process.env.HOME ?? ""): string {
   if (!dir) return "";
-  if (homeDir && dir === homeDir) return "~";
-  if (homeDir && dir.startsWith(homeDir + "/")) return `~${dir.slice(homeDir.length)}`;
-  return dir;
+  const normalized = dir === "/" ? "/" : dir.replace(/\/+$/, "");
+  if (!normalized) return "/";
+  if (homeDir && normalized === homeDir) return "~";
+  if (normalized === "/") return "/";
+  const parts = normalized.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? normalized;
 }
 
 export function formatAgentContext(
