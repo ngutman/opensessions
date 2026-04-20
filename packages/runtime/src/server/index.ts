@@ -276,6 +276,34 @@ export function collectGitWatchDirs(
   return currentDirs;
 }
 
+export function filterSessionAgentsForDisplay(agents: readonly AgentEvent[]): AgentEvent[] {
+  const livePiAgents = agents.filter((agent) => agent.agent === "pi" && agent.sessionResolution === "live-owner");
+  const fallbackPiAgents = agents.filter((agent) => agent.agent === "pi" && agent.sessionResolution === "project-dir");
+
+  if (livePiAgents.length > 0) {
+    return agents.filter((agent) => !(agent.agent === "pi" && agent.sessionResolution === "project-dir"));
+  }
+
+  if (fallbackPiAgents.length <= 1) {
+    return [...agents];
+  }
+
+  const newestFallback = fallbackPiAgents.reduce((best, agent) => {
+    if (agent.ts > best.ts) return agent;
+    return best;
+  });
+
+  return agents.filter((agent) => agent.sessionResolution !== "project-dir" || agent === newestFallback);
+}
+
+export function getDisplayedAgentState(agents: readonly AgentEvent[]): AgentEvent | null {
+  return agents[0] ?? null;
+}
+
+export function isSessionUnseenFromDisplayedAgents(agents: readonly AgentEvent[]): boolean {
+  return agents.some((agent) => agent.unseen === true);
+}
+
 function syncGitWatchers(sessions: SessionData[], broadcastFn: () => void) {
   const currentDirs = collectGitWatchDirs(sessions);
 
@@ -699,6 +727,8 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
       const git = getGitInfo(dir);
       const providerPaneCounts = paneCountMaps.get(provider);
       const panes = providerPaneCounts?.get(name) ?? provider.getPaneCount(name);
+      const trackedAgents = tracker.getAgents(name);
+      const displayedAgents = filterSessionAgentsForDisplay(trackedAgents);
       const enrichAgentContext = (agent: AgentEvent | null): AgentEvent | null => {
         if (!agent) return null;
         if (!agent.cwd) return { ...agent };
@@ -727,14 +757,14 @@ export function startServer(mux: MuxProvider, extraProviders?: MuxProvider[], wa
         branch: git.branch,
         dirty: git.dirty,
         isWorktree: git.isWorktree,
-        unseen: tracker.isUnseen(name),
+        unseen: isSessionUnseenFromDisplayedAgents(displayedAgents),
         panes,
         ports: getSessionPorts(name),
         localLinks: buildLocalLinks(getSessionPorts(name), portlessState),
         windows,
         uptime,
-        agentState: enrichAgentContext(tracker.getState(name)),
-        agents: tracker.getAgents(name).map((agent) => enrichAgentContext(agent)!),
+        agentState: enrichAgentContext(getDisplayedAgentState(displayedAgents)),
+        agents: displayedAgents.map((agent) => enrichAgentContext(agent)!),
         eventTimestamps: tracker.getEventTimestamps(name),
         metadata: metadataStore.get(name),
       };

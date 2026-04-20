@@ -12,9 +12,14 @@ export function canonicalizeAgentEvent(
   const owner = resolveThreadOwner(event.agent, event.threadId);
   if (!owner) return event;
 
+  const nextResolution = event.agent === "pi" ? "live-owner" : event.sessionResolution;
+
   if (owner.session === event.session) {
     if (owner.paneId && !event.paneId) {
-      return { ...event, paneId: owner.paneId };
+      return { ...event, paneId: owner.paneId, ...(nextResolution && { sessionResolution: nextResolution }) };
+    }
+    if (nextResolution && event.sessionResolution !== nextResolution) {
+      return { ...event, sessionResolution: nextResolution };
     }
     return event;
   }
@@ -23,5 +28,6 @@ export function canonicalizeAgentEvent(
     ...event,
     session: owner.session,
     ...(owner.paneId && !event.paneId && { paneId: owner.paneId }),
+    ...(nextResolution && { sessionResolution: nextResolution }),
   };
 }

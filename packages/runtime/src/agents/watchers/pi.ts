@@ -201,13 +201,20 @@ export class PiAgentWatcher implements AgentWatcher {
     this.ctx = null;
   }
 
-  private resolveEventSession(threadId: string, snapshot: SessionSnapshot): string | null {
+  private resolveEventTarget(
+    threadId: string,
+    snapshot: SessionSnapshot,
+  ): { session: string; sessionResolution: "live-owner" | "project-dir" } | null {
     if (!this.ctx) return null;
-    const byThreadOwner = this.ctx.resolveThreadOwner?.("pi", threadId)?.session ?? null;
-    if (byThreadOwner) return byThreadOwner;
-    return snapshot.projectDir
+    const owner = this.ctx.resolveThreadOwner?.("pi", threadId) ?? null;
+    if (owner?.session) {
+      return { session: owner.session, sessionResolution: "live-owner" };
+    }
+    const session = snapshot.projectDir
       ? this.ctx.resolveSession(snapshot.projectDir)
       : null;
+    if (!session) return null;
+    return { session, sessionResolution: "project-dir" };
   }
 
   private async processFile(filePath: string): Promise<void> {
@@ -259,13 +266,14 @@ export class PiAgentWatcher implements AgentWatcher {
     const prevStatus = prev?.status;
     if (nextSnapshot.status === prevStatus) return;
 
-    const session = this.resolveEventSession(threadId, nextSnapshot);
-    if (!session) return;
+    const target = this.resolveEventTarget(threadId, nextSnapshot);
+    if (!target) return;
     if (!prev && nextSnapshot.status === "idle") return;
 
     this.ctx.emit({
       agent: "pi",
-      session,
+      session: target.session,
+      sessionResolution: target.sessionResolution,
       status: nextSnapshot.status,
       ts: Date.now(),
       threadId: threadId,
@@ -299,12 +307,13 @@ export class PiAgentWatcher implements AgentWatcher {
         for (const [threadId, snapshot] of this.sessions) {
           if (snapshot.status === "idle") continue;
 
-          const session = this.resolveEventSession(threadId, snapshot);
-          if (!session) continue;
+          const target = this.resolveEventTarget(threadId, snapshot);
+          if (!target) continue;
 
           this.ctx.emit({
             agent: "pi",
-            session,
+            session: target.session,
+            sessionResolution: target.sessionResolution,
             status: snapshot.status,
             ts: Date.now(),
             threadId: threadId,

@@ -4,6 +4,8 @@ export type AgentStatus = "idle" | "running" | "tool-running" | "done" | "error"
  *  "unknown" = watcher-only, no pane info available. */
 export type AgentLiveness = "alive" | "exited" | "unknown";
 
+export type AgentSessionResolution = "live-owner" | "project-dir";
+
 export interface AgentEvent {
   agent: string;
   session: string;
@@ -11,6 +13,8 @@ export interface AgentEvent {
   ts: number;
   threadId?: string;
   threadName?: string;
+  /** How this agent thread was mapped to an opensessions session */
+  sessionResolution?: AgentSessionResolution;
   /** Best-known cwd for this agent instance, preferably from the live pane */
   cwd?: string;
   /** Git branch resolved for cwd when available */

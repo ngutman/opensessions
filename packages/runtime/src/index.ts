@@ -17,7 +17,7 @@ export {
   isBatchCapable,
   isFullSidebarCapable,
 } from "./contracts/mux";
-export type { AgentStatus, AgentLiveness, AgentEvent, PanePresenceInput } from "./contracts/agent";
+export type { AgentStatus, AgentLiveness, AgentSessionResolution, AgentEvent, PanePresenceInput } from "./contracts/agent";
 export { TERMINAL_STATUSES } from "./contracts/agent";
 export type { AgentWatcher, AgentWatcherContext, AgentThreadOwner } from "./contracts/agent-watcher";
 export { AgentTracker } from "./agents/tracker";

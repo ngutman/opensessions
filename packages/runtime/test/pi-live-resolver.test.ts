@@ -119,6 +119,7 @@ describe("PiLiveResolver", () => {
         status: "running",
         ts: 1000,
         threadId: "thread-1",
+        sessionResolution: "project-dir",
       },
       (agent, threadId) => {
         if (agent !== "pi" || !threadId) return null;
@@ -137,6 +138,7 @@ describe("PiLiveResolver", () => {
       session: "CodexBar",
       threadId: "thread-1",
       paneId: "%4",
+      sessionResolution: "live-owner",
     });
   });
 });

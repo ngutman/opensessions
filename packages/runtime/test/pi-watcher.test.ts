@@ -93,6 +93,7 @@ describe("PiAgentWatcher", () => {
     expect(events[0]!.status).toBe("running");
     expect(events[0]!.threadId).toBe("12345678-1234-1234-1234-123456789abc");
     expect(events[0]!.threadName).toBe("Fix the watcher status mapping");
+    expect(events[0]!.sessionResolution).toBe("project-dir");
   });
 
   test("emits done when Pi writes a final assistant turn", async () => {
@@ -125,6 +126,7 @@ describe("PiAgentWatcher", () => {
     expect(last.status).toBe("done");
     expect(last.threadId).toBe("12345678-1234-1234-1234-123456789abc");
     expect(last.threadName).toBe("Fix the watcher status mapping");
+    expect(last.sessionResolution).toBe("project-dir");
   });
 
   test("emits running for a newly created active Pi session", async () => {
@@ -177,6 +179,7 @@ describe("PiAgentWatcher", () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.status).toBe("running");
     expect(events[0]!.threadId).toBe("abcdefab-cdef-cdef-cdef-abcdefabcdef");
+    expect(events[0]!.sessionResolution).toBe("project-dir");
   });
 
   test("falls back to live thread ownership when cwd does not map to a mux session", async () => {
@@ -193,6 +196,7 @@ describe("PiAgentWatcher", () => {
     expect(events[0]!.session).toBe("myapp-session");
     expect(events[0]!.threadId).toBe("12345678-1234-1234-1234-123456789abc");
     expect(events[0]!.status).toBe("running");
+    expect(events[0]!.sessionResolution).toBe("live-owner");
   });
 
   test("prefers live thread ownership over broad cwd matches", async () => {
@@ -207,6 +211,7 @@ describe("PiAgentWatcher", () => {
 
     expect(events).toHaveLength(1);
     expect(events[0]!.session).toBe("myapp-session");
+    expect(events[0]!.sessionResolution).toBe("live-owner");
   });
 
   test("uses live thread ownership even when the transcript header has no cwd", async () => {
@@ -242,5 +247,6 @@ describe("PiAgentWatcher", () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.session).toBe("myapp-session");
     expect(events[0]!.status).toBe("running");
+    expect(events[0]!.sessionResolution).toBe("live-owner");
   });
 });
