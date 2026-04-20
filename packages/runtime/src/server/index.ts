@@ -277,15 +277,34 @@ export function collectGitWatchDirs(
 }
 
 export function filterSessionAgentsForDisplay(agents: readonly AgentEvent[]): AgentEvent[] {
-  const livePiAgents = agents.filter((agent) => agent.agent === "pi" && agent.sessionResolution === "live-owner");
-  const fallbackPiAgents = agents.filter((agent) => agent.agent === "pi" && agent.sessionResolution === "project-dir");
+  const visibleAgents = agents.filter((agent) => !(agent.agent === "pi" && agent.isSynthetic === true && agent.liveness === "exited"));
+  const currentLivePiAgents = visibleAgents.filter(
+    (agent) => agent.agent === "pi"
+      && agent.sessionResolution === "live-owner"
+      && agent.liveness === "alive"
+      && !!agent.paneId,
+  );
 
-  if (livePiAgents.length > 0) {
-    return agents.filter((agent) => !(agent.agent === "pi" && agent.sessionResolution === "project-dir"));
+  if (currentLivePiAgents.length > 0) {
+    const newestLivePiByPane = new Map<string, AgentEvent>();
+    for (const agent of currentLivePiAgents) {
+      const existing = newestLivePiByPane.get(agent.paneId!);
+      if (!existing || agent.ts > existing.ts) {
+        newestLivePiByPane.set(agent.paneId!, agent);
+      }
+    }
+
+    return visibleAgents.filter((agent) => {
+      if (agent.agent !== "pi") return true;
+      if (agent.sessionResolution !== "live-owner") return false;
+      if (agent.liveness !== "alive" || !agent.paneId) return false;
+      return newestLivePiByPane.get(agent.paneId) === agent;
+    });
   }
 
+  const fallbackPiAgents = visibleAgents.filter((agent) => agent.agent === "pi" && agent.sessionResolution === "project-dir");
   if (fallbackPiAgents.length <= 1) {
-    return [...agents];
+    return [...visibleAgents];
   }
 
   const newestFallback = fallbackPiAgents.reduce((best, agent) => {
@@ -293,7 +312,7 @@ export function filterSessionAgentsForDisplay(agents: readonly AgentEvent[]): Ag
     return best;
   });
 
-  return agents.filter((agent) => agent.sessionResolution !== "project-dir" || agent === newestFallback);
+  return visibleAgents.filter((agent) => agent.sessionResolution !== "project-dir" || agent === newestFallback);
 }
 
 export function getDisplayedAgentState(agents: readonly AgentEvent[]): AgentEvent | null {

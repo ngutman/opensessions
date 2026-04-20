@@ -17,18 +17,21 @@ function agent(overrides: Partial<AgentEvent> = {}): AgentEvent {
 }
 
 describe("Pi display filtering", () => {
-  test("suppresses project-dir Pi rows when live-owner Pi rows exist", () => {
+  test("keeps only the newest live-owner Pi row per pane and suppresses other Pi rows", () => {
     const displayed = filterSessionAgentsForDisplay([
       agent({ threadId: "fallback", ts: 30, unseen: true, sessionResolution: "project-dir" }),
-      agent({ threadId: "live", ts: 20, sessionResolution: "live-owner", paneId: "%4", liveness: "alive" }),
+      agent({ threadId: "older-live", ts: 20, sessionResolution: "live-owner", paneId: "%4", liveness: "alive", status: "done", unseen: true }),
+      agent({ threadId: "new-live", ts: 25, sessionResolution: "live-owner", paneId: "%4", liveness: "alive" }),
+      agent({ threadId: "other-pane", ts: 24, sessionResolution: "live-owner", paneId: "%5", liveness: "alive" }),
       agent({ agent: "codex", threadId: "codex-1", ts: 10, unseen: false }),
     ]);
 
     expect(displayed.map((entry) => `${entry.agent}:${entry.threadId}`)).toEqual([
-      "pi:live",
+      "pi:new-live",
+      "pi:other-pane",
       "codex:codex-1",
     ]);
-    expect(getDisplayedAgentState(displayed)?.threadId).toBe("live");
+    expect(getDisplayedAgentState(displayed)?.threadId).toBe("new-live");
     expect(isSessionUnseenFromDisplayedAgents(displayed)).toBe(false);
   });
 
@@ -56,6 +59,17 @@ describe("Pi display filtering", () => {
     expect(displayed.map((entry) => `${entry.agent}:${entry.threadId}`)).toEqual([
       "pi:fallback",
       "pi:synthetic-live",
+    ]);
+  });
+
+  test("hides exited synthetic Pi rows", () => {
+    const displayed = filterSessionAgentsForDisplay([
+      agent({ threadId: "exited-synth", ts: 10, isSynthetic: true, liveness: "exited" }),
+      agent({ threadId: "fallback", ts: 9, sessionResolution: "project-dir" }),
+    ]);
+
+    expect(displayed.map((entry) => `${entry.agent}:${entry.threadId}`)).toEqual([
+      "pi:fallback",
     ]);
   });
 });

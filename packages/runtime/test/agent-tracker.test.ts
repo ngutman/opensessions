@@ -554,5 +554,35 @@ describe("AgentTracker", () => {
       });
       expect(agents[0]!.isSynthetic).not.toBe(true);
     });
+
+    test("marks the previous thread exited when a pane is reassigned to a new exact thread", () => {
+      tracker.applyEvent(event({
+        session: "sess-1",
+        agent: "pi",
+        threadId: "thread-a",
+        status: "done",
+        paneId: "%41",
+        liveness: "alive",
+      }));
+
+      const changed = tracker.applyPanePresence("sess-1", [
+        { agent: "pi", paneId: "%41", threadId: "thread-b", cwd: "/Users/guti/projects/tokenjuice" },
+      ]);
+
+      expect(changed).toBe(true);
+      const agents = tracker.getAgents("sess-1");
+      expect(agents.find((agent) => agent.threadId === "thread-a")).toMatchObject({
+        status: "done",
+        liveness: "exited",
+        paneId: undefined,
+      });
+      expect(agents.find((agent) => agent.threadId === "thread-b")).toMatchObject({
+        status: "idle",
+        liveness: "alive",
+        paneId: "%41",
+        cwd: "/Users/guti/projects/tokenjuice",
+        isSynthetic: true,
+      });
+    });
   });
 });

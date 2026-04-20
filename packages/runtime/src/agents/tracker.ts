@@ -362,6 +362,15 @@ export class AgentTracker {
       };
 
       if (pa.threadId) {
+        for (const [, event] of sessionInstances) {
+          if (event.agent !== pa.agent) continue;
+          if (event.threadId === pa.threadId) continue;
+          if (event.paneId !== pa.paneId) continue;
+          event.liveness = "exited";
+          event.paneId = undefined;
+          changed = true;
+        }
+
         const paneKey = `${pa.agent}\0${pa.paneId}`;
         const carriedPaneCwd = pa.cwd ?? paneCwdsByAgentAndPane.get(paneKey);
         const exactKey = instanceKey(pa.agent, pa.threadId);
